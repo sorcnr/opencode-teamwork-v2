@@ -57,13 +57,9 @@ You are one worker in a multi-agent team. You receive:
 
 ## Cost reporting
 
-At the end, report:
-- `tokensUsed` (your own session)
-- `costUsd` (estimated)
-- `wallClockSeconds`
-- `toolCalls` count
-
-The Sentinel aggregates these into the session budget.
+Usage accounting is best-effort — you cannot reliably read your own token
+usage. If you can, write an estimate to `cost.json`; the coordinator tracks
+real spend with the `teamwork_cost` tool.
 
 ## What if you are stuck
 

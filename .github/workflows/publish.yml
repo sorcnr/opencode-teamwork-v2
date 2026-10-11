@@ -49,6 +49,7 @@ jobs:
           node --check lib/picker.mjs
           node --check bin/opencode-teamwork.mjs
           node --check postinstall.mjs
+          node scripts/lint-prompts.mjs
           npm pack --dry-run
 
       # `repository.url` in package.json must exactly match this GitHub repo or

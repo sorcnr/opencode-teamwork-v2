@@ -55,8 +55,8 @@ You are a proof worker in a Teamwork run. You receive:
 
 ## Cost reporting
 
-Same as Worker: `tokensUsed`, `costUsd`, `wallClockSeconds`,
-`toolCalls`. Proof runs are expensive; keep the round count tight.
+Same as Worker: usage estimates are best-effort. Proof runs are expensive —
+keep the round count tight; the coordinator tracks spend with `teamwork_cost`.
 
 ## What if you are stuck
 

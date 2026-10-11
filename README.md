@@ -30,15 +30,39 @@ rewritten for the V2 plugin + agent APIs. Verified against **OpenCode `v2.0.26`*
 ```
 package.json                      # npm manifest (name: opencode-teamwork-v2)
 index → plugins/opencode-teamwork/index.ts   # V2 plugin, registers the 7 commands
+plugins/opencode-teamwork/tools.ts           # engine tools + hooks (V2 API)
 agents/team/*.md                  # 10 team agents (markdown, V2 frontmatter)
+docs/ARTIFACTS.md                 # canonical artifact layout, topologies, schemas
 lib/team.mjs                      # installer core (config dir, model map, agent files)
 lib/picker.mjs                    # interactive model picker (`opencode models`)
 bin/opencode-teamwork.mjs         # CLI: init / models / install / status
+scripts/lint-prompts.mjs          # prompt linter (run in CI)
 postinstall.mjs                   # asks for models during npm install
-plugins/opencode-teamwork/
-├── index.ts                      # V2 plugin entry
-└── package.json                  # vendored-copy manifest
 ```
+
+## Engine (tools + hooks)
+
+The run mechanics are real, not prompt prose. The plugin registers five tools
+(named `teamwork_*` after the `teamwork` namespace) and two hooks:
+
+| Tool | Purpose |
+| --- | --- |
+| `teamwork_plan` | create the run dir + `plan.dag.json` / `state.json` / `costs.json` |
+| `teamwork_status` | per-task progress for the active run |
+| `teamwork_resume` | tasks still open, for a restart |
+| `teamwork_cost` | read/add budget spend (warns at 80%) |
+| `teamwork_pitfall` | append to the pitfall registry |
+
+Hooks: `permission.evaluate` enforces the read-only guarantee for the verifier,
+falsifier and scout **in code** (not just in their prompts), and
+`session.context` injects the active run's state + pitfalls into every team
+agent's system prompt.
+
+All run artifacts live under `.opencode/teamwork/<session-id>/`; see
+[`docs/ARTIFACTS.md`](docs/ARTIFACTS.md) for the layout, the canonical
+topologies, and the JSON schemas (`spec.json`, `plan.dag.json`, `state.json`,
+`verification_report.json`). The installer copies that reference to
+`<config-dir>/teamwork/ARTIFACTS.md` next to your agents.
 
 ## Install
 
@@ -188,8 +212,9 @@ Note that npm is restricting bypass-2FA tokens from January 2027, so Trusted
 Publishing is the durable option.
 
 `files` in `package.json` is a whitelist (`agents`, `plugins`, `lib`, `bin`,
-`postinstall.mjs`, `README.md`, `LICENSE`), so tests and scratch dirs never ship.
-The runtime has **zero dependencies**; `postinstall` uses only Node built-ins.
+`docs`, `postinstall.mjs`, `README.md`, `LICENSE`), so tests and scratch dirs
+never ship. The runtime has **zero dependencies**; `postinstall` uses only Node
+built-ins.
 
 ## Commands
 
@@ -217,11 +242,15 @@ Model assignments live in each agent's frontmatter (`model:`); see
 - The plugin is intentionally **dependency-free at runtime** — it does not import
   `@opencode/plugin`, so the loader never needs to resolve `node_modules` for it.
   The exported object shape is identical to `Plugin.define({ id, setup })`.
-- V2 agents cannot be created by a plugin, so the plugin only registers commands
-  and (in the npm package) recreates any missing `team/*.md` agent files from the
-  packaged defaults on load. If you prefer no plugin at all, move the 7 command
-  definitions into markdown files under `~/.config/opencode/commands/` (V2
-  discovers them natively).
+- V2 agents cannot be created by a plugin, so the plugin only registers commands,
+  ships the `teamwork_*` engine tools, and (in the npm package) recreates any
+  missing `team/*.md` agent files from the packaged defaults on load. If you
+  prefer no plugin at all, move the 7 command definitions into markdown files
+  under `~/.config/opencode/commands/` (V2 discovers them natively).
+- Prompt invariants (one artifact root, one topology enum, no stale references,
+  no blocking `effect: ask` in parallel agents) are enforced by
+  `scripts/lint-prompts.mjs` — run `npm run lint:prompts`. CI runs it whenever
+  agents, the plugin or docs change.
 - Docs: <https://opencode.ai/v2/docs/build/plugins>
 
 ## License & attribution
