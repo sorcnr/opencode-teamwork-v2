@@ -47,7 +47,8 @@ plugins/opencode-teamwork/
 > model prompt therefore may not appear during `opencode plugin add`, but the
 > agents are still created — the plugin self-heals them on load with the DeepSeek
 > defaults. To choose models, run the `init` command below. (`postinstall` does
-> fire normally for a plain `npm install`.)
+> fire for a plain `npm install`, and is intentionally skipped under `npx` /
+> `npm exec` so the `init` run doesn't prompt twice.)
 
 ### From GitHub (no npm account needed)
 

@@ -25,6 +25,10 @@ function truthy(value) {
 }
 
 async function main() {
+  // `npx <pkg> ...` / `npm exec` installs a throwaway copy just to run the CLI.
+  // The CLI (`init`) does the real setup, so running here too would double-prompt.
+  if (process.env.npm_command === "exec") return
+
   if (truthy(process.env.OPENCODE_TEAMWORK_SKIP) || truthy(process.env.CI)) {
     console.log(`[${PACKAGE_NAME}] Skipping interactive setup (CI / OPENCODE_TEAMWORK_SKIP).`)
     console.log(`[${PACKAGE_NAME}] Run \`npx ${PACKAGE_NAME} init\` to choose agent models.`)
