@@ -25,9 +25,11 @@ function truthy(value) {
 }
 
 async function main() {
-  // `npx <pkg> ...` / `npm exec` installs a throwaway copy just to run the CLI.
-  // The CLI (`init`) does the real setup, so running here too would double-prompt.
-  if (process.env.npm_command === "exec") return
+  // `npx <pkg> ...` / `npm exec` installs a throwaway copy under ~/.npm/_npx
+  // just to run the CLI. The CLI (`init`) does the real setup, so running here
+  // too would double-prompt. Detect it by command *and* by install path.
+  const viaNpx = process.env.npm_command === "exec" || import.meta.url.includes("/_npx/")
+  if (viaNpx) return
 
   if (truthy(process.env.OPENCODE_TEAMWORK_SKIP) || truthy(process.env.CI)) {
     console.log(`[${PACKAGE_NAME}] Skipping interactive setup (CI / OPENCODE_TEAMWORK_SKIP).`)
