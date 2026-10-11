@@ -42,6 +42,7 @@
   ],
   "scripts": {
     "postinstall": "node ./postinstall.mjs",
+    "lint:prompts": "node ./scripts/lint-prompts.mjs",
     "init": "node ./bin/opencode-teamwork.mjs init",
     "models": "node ./bin/opencode-teamwork.mjs models",
     "status": "node ./bin/opencode-teamwork.mjs status"
