@@ -25,11 +25,14 @@ function truthy(value) {
 }
 
 async function main() {
-  // `npx <pkg> ...` / `npm exec` installs a throwaway copy under ~/.npm/_npx
-  // just to run the CLI. The CLI (`init`) does the real setup, so running here
-  // too would double-prompt. Detect it by command *and* by install path.
-  const viaNpx = process.env.npm_command === "exec" || import.meta.url.includes("/_npx/")
-  if (viaNpx) return
+  // Skip throwaway installs that npm performs outside the user's project:
+  //   * ~/.npm/_npx/...          -> `npx <pkg>` / `npm exec`
+  //   * ~/.npm/_cacache/tmp/...  -> git dependency checkout/build step
+  // The real setup for those flows is the explicit `init` command, so running
+  // here too would double-prompt (and write to config during a build).
+  const url = import.meta.url
+  const throwaway = process.env.npm_command === "exec" || url.includes("/_npx/") || url.includes("/_cacache/")
+  if (throwaway) return
 
   if (truthy(process.env.OPENCODE_TEAMWORK_SKIP) || truthy(process.env.CI)) {
     console.log(`[${PACKAGE_NAME}] Skipping interactive setup (CI / OPENCODE_TEAMWORK_SKIP).`)
