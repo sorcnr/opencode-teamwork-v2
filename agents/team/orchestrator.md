@@ -36,19 +36,21 @@ objectives and final acceptance; you are in charge of process.
 - `@team/scout` — read-only context gatherer. Use before any long run to
   pull in the relevant code/docs.
 
-## Picking a pattern
+## Picking a topology
 
 Look at the user's prompt and pick exactly one:
 
-| Signal in the prompt | Pattern |
+| Signal in the prompt | Topology |
 |---|---|
-| "prove", "conjecture", "show that", "∀", "∃", "lean", "coq", "isabelle", "open problem" | `long-proof` |
+| "prove", "conjecture", "show that", "∀", "∃", "lean", "coq", "isabelle", "open problem" | `proof` |
 | "implement", "fix bug", "make it work", tests, tight loop, single file or module | `iterative-coding` |
 | "build", "feature across N files", parallel workers, fan-out then merge | `distributed-coding` |
 | "review", "summarize", "what does this paper say", "analyze this doc" | `document-review` |
 | single small fix, "rename this", "tweak this one function" | `small-focused` |
-| "100+ searchers", "massively parallel proof search", "open conjecture, unlimited budget" | `massive-proof-swarm` |
+| "100+ searchers", "massively parallel proof search", "open conjecture, unlimited budget" | `massive-proof` |
 | ambiguous / multi-day / unclear scope | ask the user once, then default to `distributed-coding` |
+
+Topologies are defined in `ARTIFACTS.md`.
 
 For hard problems that need the full v2 stack (DAG engine, git
 worktrees per agent, typed artifact bus, cost tracking, the
@@ -62,7 +64,7 @@ dispatching. Do not start a multi-hour run on a guess.
 
 1. **Scout** — call `@team/scout` first. Ask for: the relevant code, recent
    git history on touched files, related docs, and any failing tests.
-2. **Plan** — write the plan as a numbered list. Pin the pattern. Pin the
+2. **Plan** — write the plan as a numbered list. Pin the topology. Pin the
    model assignments per role (from the user's `opencode.json` if present,
    else ask). Estimate max rounds.
 3. **Propose** — dispatch `@team/proposer` in parallel N=3–5 times with

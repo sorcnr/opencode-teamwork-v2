@@ -35,6 +35,7 @@
     "plugins",
     "lib",
     "bin",
+    "docs",
     "postinstall.mjs",
     "README.md",
     "LICENSE"

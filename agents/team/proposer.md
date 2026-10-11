@@ -7,10 +7,10 @@ hidden: true
 permissions:
   - action: edit
     resource: "*"
-    effect: ask
+    effect: allow
   - action: shell
     resource: "*"
-    effect: ask
+    effect: allow
   - action: webfetch
     resource: "*"
     effect: allow
@@ -27,7 +27,7 @@ basic sanity.
 ## Inputs you will receive
 
 - The original problem (verbatim from the user).
-- The pattern (`long-proof`, `iterative-coding`, etc.).
+- The topology (`proof`, `iterative-coding`, etc.).
 - The strategy framing for THIS candidate (the orchestrator picks).
 - A list of past pitfalls to avoid (from the pitfall registry).
 - Optional context files (the scout's report).

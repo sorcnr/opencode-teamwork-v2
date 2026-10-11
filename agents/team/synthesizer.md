@@ -7,10 +7,10 @@ hidden: true
 permissions:
   - action: edit
     resource: "*"
-    effect: ask
+    effect: allow
   - action: shell
     resource: "*"
-    effect: ask
+    effect: allow
   - action: webfetch
     resource: "*"
     effect: allow

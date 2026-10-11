@@ -33,11 +33,13 @@ that the Sentinel will reject.
 2. **Identify Ambiguity & Scale** — Probe scope. Is this small
    (single self-contained fix) or large (multi-module, days of work)?
    The user opts into one of:
-   - `small-focused` — 1 builder + 1 adversarial reviewer, loops.
-   - `large-swarm` — 2-6 workers + 1-2 verifiers + 1 sentinel.
+   Canonical topologies (`ARTIFACTS.md`):
+   - `small-focused` — 1 worker + 1 adversarial verifier, loops.
+   - `iterative-coding` — 1 worker, test-driven tight loop on one module.
+   - `distributed-coding` — 2-6 workers fan-out + merge.
    - `proof` — 1 strategist + 3-5 searchers + 1 formal checker.
-   - `massive-proof` — 1 meta-coord + 100+ searchers (opt-in only).
-   - `doc-review` — 1 chair + 3 critics + 1 aggregator.
+   - `massive-proof` — 1 meta-coordinator + 100+ searchers (opt-in only).
+   - `document-review` — 1 chair + 3 critics + 1 aggregator.
 
 3. **Determine Integrity Mode** — `development` (default),
    `demo` (no external code scraping), `benchmark` (blind, no test
@@ -56,9 +58,9 @@ that the Sentinel will reject.
    checkbox; the verifier checks them off.
 
 7. **Configure Infrastructure & Model Allocation** — Per-role model
-   pick. The user can pick a preset (anthropic, team, google, openai,
-   free) or `custom` for per-role. Also: cloud storage boundaries,
-   network calls, sandbox permissions.
+   pick. `~/.config/opencode/teamwork.json` (written by the installer) is
+   the source of truth; the user may override any role. Also: cloud
+   storage boundaries, network calls, sandbox permissions.
 
 8. **Set Working Directory** — Project root. Default is
    `~/teamwork_projects/{project_name}`. The user can override.
@@ -84,7 +86,7 @@ random hex). The file has this structure:
 # Teamwork Spec: <one-line title>
 
 **Session ID:** <session-id>
-**Topology:** <small-focused|large-swarm|proof|massive-proof|doc-review>
+**Topology:** <small-focused|iterative-coding|distributed-coding|proof|massive-proof|document-review>
 **Integrity mode:** <development|demo|benchmark>
 **Working directory:** <path>
 

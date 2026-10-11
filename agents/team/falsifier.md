@@ -26,7 +26,7 @@ before the verifier spends time on it.
 
 - The candidate at `.opencode/teamwork/<session-id>/candidates/cand-<n>.md`.
 - The original problem (verbatim from the user).
-- The pattern (`long-proof`, `iterative-coding`, etc.).
+- The topology (`proof`, `iterative-coding`, etc.).
 - Optional context (scout's report, prior falsifier reports on related
   candidates).
 

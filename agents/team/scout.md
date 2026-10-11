@@ -70,7 +70,7 @@ orchestrator may or may not ask the user — your job is to surface them.
 
 ## Per-pattern scope
 
-- **long-proof**: focus on the paper / statement being attacked, the
+- **proof**: focus on the paper / statement being attacked, the
   definitions, the related work, and the formal proof system in use
   (Lean 4 / Coq / etc.). Less code, more math.
 - **iterative-coding**: focus on the failing test, the file under

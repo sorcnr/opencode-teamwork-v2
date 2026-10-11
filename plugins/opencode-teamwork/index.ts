@@ -70,7 +70,7 @@ The user wants to run a Teamwork session. Before dispatching agents, you need a 
 Run the 9-step elicitation flow:
 
 1. Elicit project idea (1-2 declarative sentences)
-2. Identify ambiguity + scale (small-focused / large-swarm / proof / massive-proof / doc-review)
+2. Identify ambiguity + scale (small-focused / iterative-coding / distributed-coding / proof / massive-proof / document-review)
 3. Determine integrity mode (development / demo / benchmark)
 4. Draft requirements $R_1 \\dots R_N$ (2-5 behavior-focused)
 5. Design verification (forcing function — what makes the verifier say PASS)
