@@ -35,11 +35,13 @@ jobs:
           registry-url: "https://registry.npmjs.org"
           package-manager-cache: false # never cache in release builds
 
-      # The package has zero dependencies, so there is nothing to install.
-      # The npm CLI bundled with the runner is new enough for OIDC (>= 11.5.1),
-      # but pin the latest to be safe.
+      # Trusted publishing (OIDC) needs npm >= 11.5.1. Prefer the latest npm but
+      # fall back to the newest 11.x if the latest requires a newer Node.
       - name: Ensure recent npm
-        run: npm install -g npm@latest
+        run: |
+          npm install -g npm@latest || npm install -g "npm@^11"
+          npm --version
+          node -e "const v=require('child_process').execSync('npm --version').toString().trim().split('.').map(Number); if(v[0]<11||(v[0]===11&&v[1]<5)){console.error('npm too old for OIDC:',v.join('.'));process.exit(1)}"
 
       - name: Sanity check
         run: |
