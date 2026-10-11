@@ -1,0 +1,56 @@
+name: Publish Package
+
+# Publishes to npm using Trusted Publishing (OIDC) — no NPM_TOKEN secret.
+#
+# One-time setup on npmjs.com (after the package exists):
+#   Package → Settings → Trusted Publisher → GitHub Actions
+#     Organization or user : sorcnr
+#     Repository           : opencode-teamwork-v2
+#     Workflow filename    : publish.yml
+#     Allowed actions      : npm publish   (npm stage publish is always allowed)
+#
+# Release flow:
+#   npm version patch        # or edit "version" in package.json
+#   git push --follow-tags   # pushes the vX.Y.Z tag -> this workflow publishes
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  id-token: write # Required for OIDC trusted publishing
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+          package-manager-cache: false # never cache in release builds
+
+      # The package has zero dependencies, so there is nothing to install.
+      # The npm CLI bundled with the runner is new enough for OIDC (>= 11.5.1),
+      # but pin the latest to be safe.
+      - name: Ensure recent npm
+        run: npm install -g npm@latest
+
+      - name: Sanity check
+        run: |
+          node --check lib/team.mjs
+          node --check lib/picker.mjs
+          node --check bin/opencode-teamwork.mjs
+          node --check postinstall.mjs
+          npm pack --dry-run
+
+      # `repository.url` in package.json must exactly match this GitHub repo or
+      # provenance/OIDC verification fails. npm generates provenance
+      # automatically under trusted publishing — no --provenance flag needed.
+      - name: Publish
+        run: npm publish --access public

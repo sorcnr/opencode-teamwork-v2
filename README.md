@@ -164,10 +164,23 @@ npm publish --dry-run
 npm publish --access public
 ```
 
-For CI, prefer **npm Trusted Publishing** (OIDC, no long-lived token): configure
-the GitHub publisher on the npm package page once, then publish from a workflow
-with `id-token: write`. Note that npm is restricting bypass-2FA tokens from
-January 2027, so Trusted Publishing is the durable option.
+For CI, this repo ships [`.github/workflows/publish.yml`](.github/workflows/publish.yml)
+using **npm Trusted Publishing** (OIDC, no long-lived token). One-time setup:
+
+1. Create the package with a first manual publish (`npm publish`, token above) —
+   package settings only exist once the package exists.
+2. On npmjs.com: **Package → Settings → Trusted Publisher → GitHub Actions**
+   with user `sorcnr`, repo `opencode-teamwork-v2`, workflow `publish.yml`,
+   and `npm publish` allowed.
+3. Release afterwards by tagging:
+
+   ```sh
+   npm version patch        # bumps package.json + creates the vX.Y.Z tag
+   git push --follow-tags   # triggers the workflow
+   ```
+
+Note that npm is restricting bypass-2FA tokens from January 2027, so Trusted
+Publishing is the durable option.
 
 `files` in `package.json` is a whitelist (`agents`, `plugins`, `lib`, `bin`,
 `postinstall.mjs`, `README.md`, `LICENSE`), so tests and scratch dirs never ship.
