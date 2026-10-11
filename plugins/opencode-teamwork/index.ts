@@ -102,14 +102,14 @@ Follow the v1 run loop:
 4. Synthesize (unless iterative-coding).
 5. Verify.
 6. If FAIL, log a pitfall and re-propose.
-7. Present the final artifact at \`.teamwork-runs/<run-id>/final.md\`.
+7. Present the final artifact at \`.opencode/teamwork/<session-id>/final.md\`.
 
 If you want the v2 features (DAG engine, git worktrees per agent, typed artifact bus, cost tracking, prompt-crafter wizard), use \`/teamwork\` instead.`,
   },
   {
     name: "team-propose",
     description:
-      "Run only the propose step. Generates N candidate solutions in parallel and writes them under .teamwork-runs/. Use when you want to inspect raw candidates before the falsifier step.",
+      "Run only the propose step. Generates N candidate solutions in parallel and writes them under .opencode/teamwork/. Use when you want to inspect raw candidates before the falsifier step.",
     agent: "team/orchestrator",
     template: `$ARGUMENTS
 
@@ -121,7 +121,7 @@ The user wants raw candidates, not a full Teamwork run. Do this:
    - Candidate 1: "the textbook approach"
    - Candidate 2: "an unconventional / contrarian angle"
    - Candidate 3: "the minimal change that could work"
-4. Write the candidates to \`.teamwork-runs/<run-id>/candidates/cand-1.md\` through \`cand-3.md\`.
+4. Write the candidates to \`.opencode/teamwork/<session-id>/candidates/cand-1.md\` through \`cand-3.md\`.
 5. STOP after writing the candidates. Do not run falsifier, synthesizer, or verifier. The user will inspect and decide next.
 
 Report back: where the candidates are, a 1-line summary of each, and any patterns you noticed across them (e.g. "all 3 candidates picked the same library — this might be the wrong choice").`,
@@ -135,10 +135,10 @@ Report back: where the candidates are, a 1-line summary of each, and any pattern
 
 The user wants falsifier critiques of existing candidates. Do this:
 
-1. List the candidates in \`.teamwork-runs/<run-id>/candidates/\`.
+1. List the candidates in \`.opencode/teamwork/<session-id>/candidates/\`.
 2. For each candidate, dispatch \`@team/falsifier\`. Falsifiers run in parallel.
-3. Write the critiques to \`.teamwork-runs/<run-id>/critiques/crit-<n>.md\`.
-4. After all critiques are in, write a meta-summary at \`.teamwork-runs/<run-id>/critiques/summary.md\`:
+3. Write the critiques to \`.opencode/teamwork/<session-id>/critiques/crit-<n>.md\`.
+4. After all critiques are in, write a meta-summary at \`.opencode/teamwork/<session-id>/critiques/summary.md\`:
    - How many candidates were killed (FATAL).
    - How many have SERIOUS findings.
    - How many pass with MINOR findings only.
@@ -156,11 +156,11 @@ Report back: the summary and a recommendation ("synthesis likely unnecessary, al
 
 The user wants a synthesis of existing candidates and their critiques. Do this:
 
-1. Read all candidates in \`.teamwork-runs/<run-id>/candidates/\`.
-2. Read all critiques in \`.teamwork-runs/<run-id>/critiques/\`.
-3. Read the pitfall registry \`.teamwork-runs/<run-id>/pitfalls.md\` if it exists.
+1. Read all candidates in \`.opencode/teamwork/<session-id>/candidates/\`.
+2. Read all critiques in \`.opencode/teamwork/<session-id>/critiques/\`.
+3. Read the pitfall registry \`.opencode/teamwork/<session-id>/pitfalls.md\` if it exists.
 4. Dispatch \`@team/synthesizer\` with all of the above.
-5. Write the synthesis to \`.teamwork-runs/<run-id>/synthesis/syn-1.md\`.
+5. Write the synthesis to \`.opencode/teamwork/<session-id>/synthesis/syn-1.md\`.
 6. STOP. Do not verify. The user will run /teamwork or call the verifier directly.
 
 Report back: where the synthesis is, what was kept from each source candidate, and any new failure modes the synthesizer flagged. If the synthesis was inconclusive, say so explicitly and explain why.`,
@@ -174,9 +174,9 @@ Report back: where the synthesis is, what was kept from each source candidate, a
 
 The user wants verification of a specific artifact. Do this:
 
-1. Find the artifact: the latest file in \`.teamwork-runs/<run-id>/synthesis/\`, or fall back to the latest in \`candidates/\` if no synthesis exists.
+1. Find the artifact: the latest file in \`.opencode/teamwork/<session-id>/synthesis/\`, or fall back to the latest in \`candidates/\` if no synthesis exists.
 2. Dispatch \`@team/verifier\` with the artifact and the relevant critiques.
-3. Write the verification report to \`.teamwork-runs/<run-id>/verify/v-<n>.md\`.
+3. Write the verification report to \`.opencode/teamwork/<session-id>/verify/v-<n>.md\`.
 4. STOP. The user will read the report and decide.
 
 Report back: PASS or FAIL, a 1-line summary of the checks, and (if FAIL) the specific commands to reproduce. Do not propose a fix.`,

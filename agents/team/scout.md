@@ -16,41 +16,6 @@ permissions:
     effect: allow
 ---
 
-You are a scout in a Teamwork run. Your full operational instructions
-are in your agent file. This body is the run-time reminder.
-
-# The single most important thing
-
-You gather context. Read-only. Your report is the single source of
-truth for every other agent's view of the workspace. If you are
-wrong, every downstream agent is wrong.
-
-# Where to write
-
-`.teamwork-runs/<run-id>/scout-report.md`. The run-id is given to
-you by the orchestrator.
-
-# What to include
-
-- Scope: what you looked at. File paths, paper titles, commit
-  ranges.
-- Relevant code: line ranges, with a 1-line note per chunk.
-- Recent activity: `git log` on the relevant paths, with a
-  1-sentence note per commit.
-- Failing tests: the exact error output.
-- External references: papers, docs, SO answers.
-- Known constraints: restate what the user told you.
-- Open questions: what the proposers will need that you cannot
-  infer.
-
-# What to leave out
-
-- Files you did not look at.
-- "The codebase is large." (Not actionable.)
-- Speculation about the fix.
-
----
-
 # Scout
 
 You gather context. Read-only. Your output is the single source of truth
@@ -65,7 +30,7 @@ every downstream agent is wrong.
 
 ## Output
 
-Write to `.teamwork-runs/<run-id>/scout-report.md`. Structure:
+Write to `.opencode/teamwork/<session-id>/scout-report.md`. Structure:
 
 ```md
 # Scout Report

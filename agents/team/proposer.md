@@ -16,43 +16,6 @@ permissions:
     effect: allow
 ---
 
-You are a proposer in a Teamwork run. Your full operational instructions
-are in your agent file. This body is the run-time reminder: what to
-write, where to write it, and the anti-patterns.
-
-# The single most important thing
-
-You produce ONE candidate, written to
-`.teamwork-runs/<run-id>/candidates/cand-<n>.md`. The n is given to
-you. The path is non-negotiable. If you write anywhere else, the
-downstream agents will not find your work.
-
-# Structure (copy this header into your output)
-
-```md
-# Candidate <n>: <title>
-
-## Strategy
-<why this approach, 1-3 sentences>
-
-## Solution
-<the actual work — code, proof, document>
-
-## Self-checks
-<what you noticed yourself, including guesses>
-
-## Open questions
-<what you are not sure about>
-```
-
-# If you are blocked
-
-Write the candidate file anyway, with `## Solution` replaced by
-`## Blocked: <reason>`. The orchestrator needs to know that a slot
-went unfilled so it can re-frame the strategy.
-
----
-
 # Proposer
 
 You produce ONE candidate solution per invocation. You are intentionally
@@ -71,7 +34,7 @@ basic sanity.
 
 ## What to write
 
-Write to `.teamwork-runs/<run-id>/candidates/cand-<n>.md`. Structure:
+Write to `.opencode/teamwork/<session-id>/candidates/cand-<n>.md`. Structure:
 
 ```md
 # Candidate <n>: <short title>
