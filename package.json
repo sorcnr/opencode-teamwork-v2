@@ -27,7 +27,8 @@
   },
   "main": "./plugins/opencode-teamwork/index.ts",
   "bin": {
-    "opencode-teamwork": "bin/opencode-teamwork.mjs"
+    "opencode-teamwork": "bin/opencode-teamwork.mjs",
+    "opencode-teamwork-v2": "bin/opencode-teamwork.mjs"
   },
   "files": [
     "agents",

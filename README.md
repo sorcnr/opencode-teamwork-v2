@@ -76,6 +76,11 @@ npx opencode-teamwork-v2 models    # pick models only (never edits opencode.json
 npx opencode-teamwork-v2 status    # show what is installed and mapped
 ```
 
+`opencode-teamwork` and `opencode-teamwork-v2` are aliases for the same CLI. If
+you are running from **inside this package's own checkout**, use the bundled
+scripts (`npm run init`, `npm run models`, `npm run status`) — `npx <name>` there
+resolves the local package rather than the registry copy.
+
 Non-interactive / scripted use:
 
 ```sh
