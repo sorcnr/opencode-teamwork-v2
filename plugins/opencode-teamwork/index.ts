@@ -183,9 +183,27 @@ Report back: PASS or FAIL, a 1-line summary of the checks, and (if FAIL) the spe
   },
 ]
 
+// Best-effort self-heal: when this file is loaded from the published npm
+// package (rather than a hand-vendored copy) make sure the `team/*` agent
+// markdown files exist in the OpenCode config directory. Only files that are
+// completely missing are created; existing agents are never rewritten, so a
+// user's model choices from `opencode-teamwork init` are preserved. When the
+// plugin is vendored without the new package layout the import fails and this
+// quietly does nothing.
+async function ensureAgentsInstalled() {
+  try {
+    const lib = await import("../../lib/team.mjs")
+    const { fileURLToPath } = await import("node:url")
+    lib.ensureAgents({ packageRoot: fileURLToPath(new URL("../../", import.meta.url)) })
+  } catch {
+    // Vendored copy without lib/, or filesystem not writable. Not fatal.
+  }
+}
+
 export default {
   id: "opencode-teamwork",
   async setup(ctx: any) {
+    await ensureAgentsInstalled()
     await ctx.command.transform((editor: any) => {
       for (const cmd of COMMANDS) {
         editor.add({

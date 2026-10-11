@@ -28,14 +28,71 @@ rewritten for the V2 plugin + agent APIs. Verified against **OpenCode `v2.0.26`*
 ## Layout
 
 ```
-agents/team/*.md                 # 10 team agents (markdown, V2 frontmatter)
+package.json                      # npm manifest (name: opencode-teamwork-v2)
+index → plugins/opencode-teamwork/index.ts   # V2 plugin, registers the 7 commands
+agents/team/*.md                  # 10 team agents (markdown, V2 frontmatter)
+lib/team.mjs                      # installer core (config dir, model map, agent files)
+lib/picker.mjs                    # interactive model picker (`opencode models`)
+bin/opencode-teamwork.mjs         # CLI: init / models / install / status
+postinstall.mjs                   # asks for models during npm install
 plugins/opencode-teamwork/
-├── index.ts                     # V2 plugin, registers the 7 commands
-├── package.json
-└── README.md
+├── index.ts                      # V2 plugin entry
+└── package.json                  # vendored-copy manifest
 ```
 
 ## Install
+
+> **About the install prompt.** OpenCode installs plugins with **Bun**, and Bun
+> blocks dependency lifecycle scripts (`postinstall`) by default. The interactive
+> model prompt therefore may not appear during `opencode plugin add`, but the
+> agents are still created — the plugin self-heals them on load with the DeepSeek
+> defaults. To choose models, run the `init` command below. (`postinstall` does
+> fire normally for a plain `npm install`.)
+
+### From GitHub (no npm account needed)
+
+```sh
+opencode plugin add github:sorcnr/opencode-teamwork-v2
+
+# then choose a model for each agent:
+npx github:sorcnr/opencode-teamwork-v2 init
+```
+
+If `npx github:…` is unavailable, run the bundled CLI straight from the install
+directory:
+
+```sh
+node ~/.config/opencode/node_modules/opencode-teamwork-v2/bin/opencode-teamwork.mjs init
+```
+
+### From npm
+
+```sh
+opencode plugin add opencode-teamwork-v2
+
+npx opencode-teamwork-v2 init      # pick models, install agents, register plugin
+npx opencode-teamwork-v2 models    # pick models only (never edits opencode.json)
+npx opencode-teamwork-v2 status    # show what is installed and mapped
+```
+
+Non-interactive / scripted use:
+
+```sh
+npx opencode-teamwork-v2 install --all anthropic/claude-sonnet-4-5
+npx opencode-teamwork-v2 install --model sentinel=deepseek/deepseek-v4-pro \
+                                 --model scout=deepseek/deepseek-flash
+```
+
+The chosen mapping is stored in `~/.config/opencode/teamwork.json`. Existing
+agent files are never overwritten wholesale — only their `model:` line is
+rewritten — and a one-time backup of touched files lands in
+`~/.config/opencode/.opencode-teamwork-backup/<timestamp>/`.
+
+The plugin also self-heals: if the agent files are missing when the plugin
+loads (e.g. the install prompt was skipped), it recreates them from the packaged
+defaults without touching files that already exist.
+
+### Manually (no npm)
 
 1. Copy the pieces into your global OpenCode config directory:
 
@@ -69,6 +126,52 @@ plugins/opencode-teamwork/
 
    To activate without a restart: `opencode reload`.
 
+## Model assignment
+
+Each agent's model lives in the `model:` frontmatter of its markdown file. The
+shipped defaults are:
+
+- `deepseek/deepseek-v4-pro`: sentinel, orchestrator, synthesizer, verifier, falsifier, proof-worker
+- `deepseek/deepseek-flash`: crafter, worker, proposer, scout
+
+Change them with `opencode-teamwork init` (interactive), the flags above
+(scripted), or by editing the frontmatter / `teamwork.json` directly and running
+`opencode reload`.
+
+## Publishing (maintainers)
+
+There is **no separate "Bun registry"** — Bun installs from the npm registry, so
+publishing to npm is what makes the package available to `bun add`, OpenCode, and
+npm alike. Two ways to ship:
+
+**A. GitHub only (no npm account).** Nothing to publish — users install the git
+spec directly (`opencode plugin add github:sorcnr/opencode-teamwork-v2`). Just
+tag releases:
+
+```sh
+git tag v0.3.0 && git push origin main --tags
+```
+
+**B. npm registry, without interactive login.** Create a *Granular Access Token*
+(npmjs.com → Access Tokens → check **Bypass 2FA**, grant publish), then:
+
+```sh
+npm config set //registry.npmjs.org/:_authToken=TOKEN
+npm whoami                       # verify
+npm pack                         # inspect the 19-file tarball
+npm publish --dry-run
+npm publish --access public
+```
+
+For CI, prefer **npm Trusted Publishing** (OIDC, no long-lived token): configure
+the GitHub publisher on the npm package page once, then publish from a workflow
+with `id-token: write`. Note that npm is restricting bypass-2FA tokens from
+January 2027, so Trusted Publishing is the durable option.
+
+`files` in `package.json` is a whitelist (`agents`, `plugins`, `lib`, `bin`,
+`postinstall.mjs`, `README.md`, `LICENSE`), so tests and scratch dirs never ship.
+The runtime has **zero dependencies**; `postinstall` uses only Node built-ins.
+
 ## Commands
 
 | Command | Agent | Purpose |
@@ -87,22 +190,19 @@ plugins/opencode-teamwork/
 `team/verifier`, `team/orchestrator`, `team/proposer`, `team/falsifier`,
 `team/synthesizer`, `team/scout`.
 
-Model assignments live in each agent's frontmatter (`model:`). This repo ships
-with DeepSeek defaults:
-
-- `deepseek/deepseek-v4-pro`: sentinel, orchestrator, synthesizer, verifier, falsifier, proof-worker
-- `deepseek/deepseek-flash`: crafter, worker, proposer, scout
-
-Change them per agent, or set them in your `opencode.json` under `agents`.
+Model assignments live in each agent's frontmatter (`model:`); see
+[Model assignment](#model-assignment) for how to set them.
 
 ## Notes
 
 - The plugin is intentionally **dependency-free at runtime** — it does not import
   `@opencode/plugin`, so the loader never needs to resolve `node_modules` for it.
   The exported object shape is identical to `Plugin.define({ id, setup })`.
-- V2 agents cannot be created by a plugin, so the plugin only registers commands.
-  If you prefer no plugin at all, move the 7 command definitions into markdown
-  files under `~/.config/opencode/commands/` (V2 discovers them natively).
+- V2 agents cannot be created by a plugin, so the plugin only registers commands
+  and (in the npm package) recreates any missing `team/*.md` agent files from the
+  packaged defaults on load. If you prefer no plugin at all, move the 7 command
+  definitions into markdown files under `~/.config/opencode/commands/` (V2
+  discovers them natively).
 - Docs: <https://opencode.ai/v2/docs/build/plugins>
 
 ## License & attribution

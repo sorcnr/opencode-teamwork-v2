@@ -1,0 +1,53 @@
+{
+  "name": "opencode-teamwork-v2",
+  "version": "0.3.0",
+  "description": "Antigravity-style multi-agent orchestration for OpenCode V2 — 10 agents, 7 commands, interactive model assignment on install.",
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "opencode-v2",
+    "agents",
+    "multi-agent",
+    "orchestration",
+    "teamwork",
+    "deepseek"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sorcnr/opencode-teamwork-v2.git"
+  },
+  "homepage": "https://github.com/sorcnr/opencode-teamwork-v2#readme",
+  "bugs": {
+    "url": "https://github.com/sorcnr/opencode-teamwork-v2/issues"
+  },
+  "type": "module",
+  "exports": {
+    ".": "./plugins/opencode-teamwork/index.ts"
+  },
+  "main": "./plugins/opencode-teamwork/index.ts",
+  "bin": {
+    "opencode-teamwork": "bin/opencode-teamwork.mjs"
+  },
+  "files": [
+    "agents",
+    "plugins",
+    "lib",
+    "bin",
+    "postinstall.mjs",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "postinstall": "node ./postinstall.mjs",
+    "init": "node ./bin/opencode-teamwork.mjs init",
+    "models": "node ./bin/opencode-teamwork.mjs models",
+    "status": "node ./bin/opencode-teamwork.mjs status"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
