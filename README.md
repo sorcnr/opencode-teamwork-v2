@@ -12,7 +12,8 @@ PluginModule.LoadError: Plugin must export a default definition with an id and
 an effect or setup function. (cause: SchemaError(Expected object at ["default"]))
 ```
 
-This repo is the ported, V2-native version: same 10 agents and 7 slash commands,
+This repo is the ported, V2-native version: the original 10 agents plus a
+security auditor (11 total) and 7 slash commands,
 rewritten for the V2 plugin + agent APIs. Verified against **OpenCode `v2.0.26`**.
 
 ## What changed (V1 → V2)
@@ -31,7 +32,7 @@ rewritten for the V2 plugin + agent APIs. Verified against **OpenCode `v2.0.26`*
 package.json                      # npm manifest (name: opencode-teamwork-v2)
 index → plugins/opencode-teamwork/index.ts   # V2 plugin, registers the 7 commands
 plugins/opencode-teamwork/tools.ts           # engine tools + hooks (V2 API)
-agents/team/*.md                  # 10 team agents (markdown, V2 frontmatter)
+agents/team/*.md                  # 11 team agents (markdown, V2 frontmatter)
 docs/ARTIFACTS.md                 # canonical artifact layout, topologies, schemas
 lib/team.mjs                      # installer core (config dir, model map, agent files)
 lib/picker.mjs                    # interactive model picker (`opencode models`)
@@ -104,6 +105,13 @@ npx opencode-teamwork-v2 status    # show what is installed and mapped
 you are running from **inside this package's own checkout**, use the bundled
 scripts (`npm run init`, `npm run models`, `npm run status`) — `npx <name>` there
 resolves the local package rather than the registry copy.
+
+Agent prompt files are left untouched by default. To also adopt updated prompt
+bodies (keeps your model choices, backs up the old files):
+
+```sh
+npx opencode-teamwork-v2 install --refresh
+```
 
 Non-interactive / scripted use:
 
@@ -251,6 +259,10 @@ Model assignments live in each agent's frontmatter (`model:`); see
   no blocking `effect: ask` in parallel agents) are enforced by
   `scripts/lint-prompts.mjs` — run `npm run lint:prompts`. CI runs it whenever
   agents, the plugin or docs change.
+- **Security:** the guardrail model (path containment, server-derived session
+  ids, read-only enforcement, sanitised context injection, non-destructive
+  installers) is documented in [`docs/GUARDRAILS.md`](docs/GUARDRAILS.md). The
+  `team/security-auditor` agent audits a repo read-only with a clean context.
 - Docs: <https://opencode.ai/v2/docs/build/plugins>
 
 ## License & attribution

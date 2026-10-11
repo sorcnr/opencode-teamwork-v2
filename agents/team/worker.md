@@ -37,7 +37,7 @@ You are one worker in a multi-agent team. You receive:
    Do not add features the spec didn't ask for.
 4. Run your own local checks (the ones in `spec.json` "Local checks"
    section). Mark anything you COULD NOT verify.
-5. Commit your changes to your branch (`teamwork/<session-id>-agent-N`).
+5. Commit your changes to your branch (`teamwork/$SESSION_ID-agent-N`).
    Optionally also write `patch.diff` (`git diff <base>..HEAD > patch.diff`)
    for convenience — the verifier reads the branch, not the patch.
 6. Write `summary.md` — 1 paragraph: what you did, what you didn't,
@@ -47,7 +47,7 @@ You are one worker in a multi-agent team. You receive:
 ## What you do NOT do
 
 - Edit files outside your worktree.
-- Pull from main; you work off `teamwork/base-<session-id>`.
+- Pull from main; you work off `teamwork/base-$SESSION_ID`.
 - Self-certify. Your summary is "I made these changes and ran these
   checks; the verifier should check X, Y, Z independently." Not
   "this works."

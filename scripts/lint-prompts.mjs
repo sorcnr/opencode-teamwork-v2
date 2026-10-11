@@ -98,6 +98,32 @@ for (const file of ["sentinel.md", "crafter.md"]) {
   if (missing.length) fail(join(agentsDir, file), `missing canonical topologies: ${missing.join(", ")}`)
 }
 
+// Guardrail invariants (see docs/GUARDRAILS.md)
+if (!existsSync(join(root, "docs", "GUARDRAILS.md"))) errors.push("docs/GUARDRAILS.md is missing")
+if (!agents.includes("security-auditor.md")) errors.push("agents/team/security-auditor.md is missing")
+
+const toolsFile = join(root, "plugins", "opencode-teamwork", "tools.ts")
+if (existsSync(toolsFile)) {
+  const t = read(toolsFile)
+  if (!/SESSION_ID/.test(t)) fail(toolsFile, "no session-id allowlist found")
+  if (!/relative\(/.test(t) || !/startsWith\("\.\."\)/.test(t)) fail(toolsFile, "no path-containment check found")
+  if (!/realpathSync\(/.test(t)) fail(toolsFile, "no realpath containment check (symlink escape)")
+  if (!/lstatSync\(/.test(t)) fail(toolsFile, "no lstat check (symlinked run dir)")
+  if (!/permission\?\.hook|permission\.hook/.test(t)) fail(toolsFile, "no permission hook found")
+}
+
+// No unquoted session-id / command substitution in a git command (injection).
+// Scans the agent files AND the plugin's command templates.
+const shellScanFiles = [...agents.map((f) => join(agentsDir, f)), pluginFile]
+for (const path of shellScanFiles) {
+  // Join backslash line-continuations so a split command can't slip through.
+  for (const line of read(path).replace(/\\\r?\n/g, " ").split("\n")) {
+    if (!/\bgit\s/.test(line)) continue
+    if (line.includes("<session-id>")) fail(path, "unquoted <session-id> in a git command (command-injection risk)")
+    if (line.includes("$(")) fail(path, "command substitution in a git command")
+  }
+}
+
 if (errors.length) {
   console.error(`✗ prompt lint failed (${errors.length}):`)
   for (const e of errors) console.error(`  - ${e}`)

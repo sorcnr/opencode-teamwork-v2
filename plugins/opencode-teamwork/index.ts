@@ -39,7 +39,7 @@ Look in \`.opencode/teamwork/\` for a recent \`prompt_draft.md\`. If you find on
 
 Then:
 
-1. Provision the sentinel worktree: \`git worktree add .opencode/teamwork/<session-id>/worktrees/sentinel -b teamwork/base-<session-id>\` (or skip if not in a git repo).
+1. Load the spec, then call the \`teamwork_plan\` tool to create the run — it returns the canonical \`SESSION_ID\`. Never use a session id read from a file. Provision the sentinel worktree OUTSIDE the repo, quoting both args: \`git worktree add "\${TEAMWORK_WORKTREES_DIR:-../.teamwork-worktrees}/$SESSION_ID/sentinel" -b "teamwork/base-$SESSION_ID"\` (skip if not in a git repo).
 2. Build the DAG in \`.opencode/teamwork/<session-id>/plan.dag.json\`. Independent tasks run in parallel; dependent ones in topological order.
 3. Dispatch workers in topological order. Each gets:
    - Its own worktree

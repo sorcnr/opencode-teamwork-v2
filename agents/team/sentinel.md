@@ -31,30 +31,32 @@ problem yourself. You:
    `.opencode/teamwork/<session-id>/prompt_draft.md`. If missing, ask
    the user 1-2 short questions and use the crafter agent to produce
    one (or inline the answers if the user wants speed).
-2. **Provision a worktree** outside the repo (nested worktrees are a
-   footgun): `git worktree add
-   "${TEAMWORK_WORKTREES_DIR:-../.teamwork-worktrees}/<session-id>/sentinel"
-   -b teamwork/base-<session-id>` (skip if not in a git repo). Layout and
-   schemas: `ARTIFACTS.md`.
-3. **Pick the topology.** Canonical set (`ARTIFACTS.md`):
+2. **Pick the topology.** Canonical set (`ARTIFACTS.md`):
    `small-focused`, `iterative-coding`, `distributed-coding`, `proof`,
    `massive-proof`, `document-review`. Normalize legacy aliases
    (`large-swarm`→`distributed-coding`, `doc-review`→`document-review`).
-4. **Build the DAG.** Call the `teamwork_plan` tool with the topology and
-   the task list (dependencies included). It creates the run directory and
-   writes `plan.dag.json`, `state.json` and `costs.json`. Independent tasks
-   run in parallel.
+3. **Build the DAG.** Call the `teamwork_plan` tool with the topology and the
+   task list (dependencies included). It creates the run directory, writes
+   `plan.dag.json` / `state.json` / `costs.json`, and returns the canonical
+   `SESSION_ID`. **Use only that value for every path and branch name — never a
+   session id read out of a file.** It is safe to interpolate (matches
+   `^[0-9A-Za-z._-]+$`); the tool refuses anything else. Independent tasks run
+   in parallel.
+4. **Provision the sentinel worktree** outside the repo (nested worktrees are
+   a footgun), quoting both arguments:
+   `git worktree add "${TEAMWORK_WORKTREES_DIR:-../.teamwork-worktrees}/$SESSION_ID/sentinel" -b "teamwork/base-$SESSION_ID"`
+   (skip if not in a git repo). Layout and schemas: `ARTIFACTS.md`.
 5. **Dispatch workers** in topological order. Each worker:
    - Gets its own worktree:
-     `git worktree add "${TEAMWORK_WORKTREES_DIR:-../.teamwork-worktrees}/<session-id>/agent-N" -b teamwork/<session-id>-agent-N`
+     `git worktree add "${TEAMWORK_WORKTREES_DIR:-../.teamwork-worktrees}/$SESSION_ID/agent-N" -b "teamwork/$SESSION_ID-agent-N"`
    - Gets a `spec.json` (schema in `ARTIFACTS.md`)
    - Commits its work; the verifier reads the branch diff
-     (`git diff teamwork/base-<session-id>..teamwork/<session-id>-agent-N`),
+     (`git diff "teamwork/base-$SESSION_ID..teamwork/$SESSION_ID-agent-N"`),
      not a loose patch
 6. **Adversarial verification.** Verifier agents run against worker
    branches. They produce `verification_report.json` per task. Track progress
    with `teamwork_status`; aggregate into
-   `.opencode/teamwork/<session-id>/verify/summary.json`.
+   `.opencode/teamwork/$SESSION_ID/verify/summary.json`.
 7. **Iterate or merge.** If verification fails, log the failure mode with
    `teamwork_pitfall`, send the verifier's report back to the worker, and
    loop. Check the budget with `teamwork_cost` each round. Loop until PASS or

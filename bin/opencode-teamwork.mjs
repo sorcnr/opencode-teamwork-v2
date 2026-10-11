@@ -40,13 +40,15 @@ Options:
       --all <model>      Use one model for every agent (e.g. anthropic/claude-sonnet-4-5)
       --model <id>=<m>   Override one agent (repeatable), id may omit the "team/" prefix
       --no-register      Don't touch opencode.json(c)
+      --refresh          Overwrite agent prompt bodies with the shipped versions
+                         (keeps your model choices; backs up the old files)
       --config-dir <dir> Override the OpenCode config directory
       --dry-run          Print what would change without writing files
   -h, --help             Show this help
 `
 
 function parseArgs(argv) {
-  const options = { command: undefined, yes: false, all: undefined, assignments: {}, register: true, dryRun: false, configDir: undefined, help: false }
+  const options = { command: undefined, yes: false, all: undefined, assignments: {}, register: true, dryRun: false, refresh: false, configDir: undefined, help: false }
   const rest = [...argv]
   options.command = rest.shift()
   while (rest.length) {
@@ -75,6 +77,9 @@ function parseArgs(argv) {
       case "--dry-run":
         options.dryRun = true
         break
+      case "--refresh":
+        options.refresh = true
+        break
       case "-h":
       case "--help":
         options.help = true
@@ -100,6 +105,10 @@ function printSummary(configDir, models, install, registration) {
   if (registration) {
     if (registration.status === "added") console.log(`Plugin     : added "${registration.entry}" to ${registration.file}`)
     else if (registration.status === "already") console.log(`Plugin     : already configured (${registration.entry}) in ${registration.file}`)
+    else if (registration.status === "commented")
+      console.log(`Plugin     : ${registration.file} has comments — not rewriting it. Add "${PACKAGE_NAME}" to "plugins" manually.`)
+    else if (registration.status === "symlink")
+      console.log(`Plugin     : ${registration.file} is a symlink — refusing to rewrite it. Add "${PACKAGE_NAME}" to "plugins" manually.`)
     else if (registration.status === "unparsed") console.log(`Plugin     : could not parse ${registration.file} — add "${PACKAGE_NAME}" to "plugins" manually`)
   }
   console.log("\nModel assignment:")
@@ -120,7 +129,7 @@ async function run(options, { register }) {
   models = applyOverrides(models, { all: options.all, assignments: options.assignments })
 
   if (!options.dryRun) writeModelMap(configDir, models)
-  const install = installAgents({ configDir, models, dryRun: options.dryRun })
+  const install = installAgents({ configDir, models, dryRun: options.dryRun, refresh: options.refresh === true })
   const registration = register ? registerPlugin({ configDir, dryRun: options.dryRun }) : undefined
 
   printSummary(configDir, models, install, registration)

@@ -1,9 +1,9 @@
 {
   "name": "opencode-teamwork",
-  "version": "0.3.0",
+  "version": "0.5.0",
   "private": true,
   "type": "module",
-  "description": "Vendored V2 port of opencode-teamwork (registers the /teamwork command family).",
+  "description": "Vendored V2 port of opencode-teamwork (registers the /teamwork command family, ships the teamwork_* engine tools).",
   "main": "./index.ts",
   "exports": {
     ".": "./index.ts"

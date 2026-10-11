@@ -25,8 +25,8 @@ worker's branch and return a structured report.
 ## Inputs
 
 - `spec.json` — the worker's task spec (scoped)
-- The worker's branch (`teamwork/<session-id>-agent-N`) committed against
-  `teamwork/base-<session-id>`
+- The worker's branch (`teamwork/$SESSION_ID-agent-N`) committed against
+  `teamwork/base-$SESSION_ID`
 - `summary.md` — the worker's self-report
 - Your own clean worktree (never the worker's)
 
@@ -35,7 +35,7 @@ worker's branch and return a structured report.
 1. Read `spec.json` end to end. Note the "Verification" section
    and the "Acceptance criteria" checkboxes.
 2. In your own clean worktree, check out the worker's branch and inspect
-   the change: `git diff teamwork/base-<session-id>..teamwork/<session-id>-agent-N`.
+   the change: `git diff "teamwork/base-$SESSION_ID..teamwork/$SESSION_ID-agent-N"`.
    If you only have a `patch.diff`, `git apply` it against the base instead.
 3. Run the verification plan:
    - **Programmatic checks** — automated tests, type checker, linter.

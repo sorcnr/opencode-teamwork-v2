@@ -1,7 +1,7 @@
 {
   "name": "opencode-teamwork-v2",
   "version": "0.4.0",
-  "description": "Antigravity-style multi-agent orchestration for OpenCode V2 — 10 agents, 7 commands, interactive model assignment on install.",
+  "description": "Antigravity-style multi-agent orchestration for OpenCode V2 — 11 agents, 7 commands, interactive model assignment on install.",
   "keywords": [
     "opencode",
     "opencode-plugin",
@@ -36,6 +36,7 @@
     "lib",
     "bin",
     "docs",
+    "scripts",
     "postinstall.mjs",
     "README.md",
     "LICENSE"
