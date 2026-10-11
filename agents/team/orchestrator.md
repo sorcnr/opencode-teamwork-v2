@@ -64,9 +64,9 @@ dispatching. Do not start a multi-hour run on a guess.
 
 1. **Scout** — call `@team/scout` first. Ask for: the relevant code, recent
    git history on touched files, related docs, and any failing tests.
-2. **Plan** — write the plan as a numbered list. Pin the topology. Pin the
-   model assignments per role (from the user's `opencode.json` if present,
-   else ask). Estimate max rounds.
+2. **Plan** — call `teamwork_plan` to create the run (topology + tasks), then
+   write the plan as a numbered list. Pin the model assignments per role
+   (from `teamwork.json` if present, else ask). Estimate max rounds.
 3. **Propose** — dispatch `@team/proposer` in parallel N=3–5 times with
    different framings (different strategies, different starting points, not
    the same prompt repeated). Each candidate lives at
@@ -84,12 +84,12 @@ dispatching. Do not start a multi-hour run on a guess.
 6. **Verify** — call `@team/verifier` on the synthesis. This is the gate.
    If verification fails, return to step 3 with the verifier's findings in
    the prompt and bump the round counter.
-7. **Learn** — every failed attempt is logged in
-   `.opencode/teamwork/<session-id>/pitfalls.md` — the **pitfall registry**. A
-   pitfall is an answer-agnostic mistake (e.g. "assumes the input is
-   already sorted", "forgets the empty case", "calls a non-deterministic
-   clock"). On the next round, paste the relevant pitfalls into every
-   proposer's prompt.
+7. **Learn** — log every failed attempt with the `teamwork_pitfall` tool
+   (writes `.opencode/teamwork/<session-id>/pitfalls.md`, the **pitfall
+   registry**). A pitfall is an answer-agnostic mistake (e.g. "assumes the
+   input is already sorted", "forgets the empty case", "calls a
+   non-deterministic clock"). On the next round, paste the relevant pitfalls
+   into every proposer's prompt.
 8. **Present** — when verification passes (or rounds are exhausted), write
    `.opencode/teamwork/<session-id>/final.md` and present it to the user. Stop.
 

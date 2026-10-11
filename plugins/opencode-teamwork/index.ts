@@ -18,6 +18,8 @@
 // loader never has to resolve node_modules for this file. The object shape below
 // is exactly what Plugin.define({ id, setup }) produces.
 
+import { registerTeamworkTools, registerTeamworkHooks } from "./tools.ts"
+
 type CommandSpec = {
   name: string
   description: string
@@ -204,6 +206,9 @@ export default {
   id: "opencode-teamwork",
   async setup(ctx: any) {
     await ensureAgentsInstalled()
+    const root = (ctx?.location?.directory as string) || process.cwd()
+    await registerTeamworkTools(ctx, root)
+    await registerTeamworkHooks(ctx, root)
     await ctx.command.transform((editor: any) => {
       for (const cmd of COMMANDS) {
         editor.add({

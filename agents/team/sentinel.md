@@ -40,9 +40,10 @@ problem yourself. You:
    `small-focused`, `iterative-coding`, `distributed-coding`, `proof`,
    `massive-proof`, `document-review`. Normalize legacy aliases
    (`large-swarm`→`distributed-coding`, `doc-review`→`document-review`).
-4. **Build the DAG.** Map requirements ($R_1 \dots R_N$) onto tasks
-   with dependencies. Independent tasks run in parallel. The DAG
-   shape lives in `.opencode/teamwork/<session-id>/plan.dag.json`.
+4. **Build the DAG.** Call the `teamwork_plan` tool with the topology and
+   the task list (dependencies included). It creates the run directory and
+   writes `plan.dag.json`, `state.json` and `costs.json`. Independent tasks
+   run in parallel.
 5. **Dispatch workers** in topological order. Each worker:
    - Gets its own worktree:
      `git worktree add "${TEAMWORK_WORKTREES_DIR:-../.teamwork-worktrees}/<session-id>/agent-N" -b teamwork/<session-id>-agent-N`
@@ -51,16 +52,29 @@ problem yourself. You:
      (`git diff teamwork/base-<session-id>..teamwork/<session-id>-agent-N`),
      not a loose patch
 6. **Adversarial verification.** Verifier agents run against worker
-   branches. They produce `verification_report.json` per task. You
-   aggregate into `.opencode/teamwork/<session-id>/verify/summary.json`.
-7. **Iterate or merge.** If verification fails, send the verifier's
-   report back to the worker. Loop until PASS or budget exhausted.
-8. **Checkpoint every state transition.** Write
-   `.opencode/teamwork/<session-id>/state.json` after every step.
-   Allows resume after token limits or network interruption.
+   branches. They produce `verification_report.json` per task. Track progress
+   with `teamwork_status`; aggregate into
+   `.opencode/teamwork/<session-id>/verify/summary.json`.
+7. **Iterate or merge.** If verification fails, log the failure mode with
+   `teamwork_pitfall`, send the verifier's report back to the worker, and
+   loop. Check the budget with `teamwork_cost` each round. Loop until PASS or
+   budget exhausted.
+8. **Checkpoint every state transition.** Keep `state.json` current (the
+   engine tools do this); after a restart call `teamwork_resume` to pick up
+   the open tasks. Allows resume after token limits or interruption.
 9. **Merge or present.** On full success, merge the sentinel
    worktree back to the user's branch. On partial success, present
    the partial result and the open verification reports.
+
+## Tools
+
+The plugin registers these — prefer them over hand-writing files:
+
+- `teamwork_plan` — create the run dir + `plan.dag.json` / `state.json` / `costs.json`
+- `teamwork_status` — per-task progress for the active run
+- `teamwork_resume` — tasks still open (for a restart)
+- `teamwork_cost` — read/add budget spend (warns at 80%)
+- `teamwork_pitfall` — append to the pitfall registry
 
 ## What you never do
 
@@ -98,9 +112,8 @@ restarts the sentinel with the same session-id), you re-read
 - **Verifier is read-only on the worker's worktree.** The verifier
   sees the diff, not the conversation. This is the anti-leak
   guarantee.
-- **Token spend is tracked.** Every worker call reports
-  `tokensUsed` + `costUsd` (estimated). Sum to the session budget.
-  Halt when 80% of budget hit; ask user.
+- **Token spend is tracked.** Track it with `teamwork_cost`; the tool warns
+  at 80% of budget. Halt non-essential workers and ask the user.
 - **Deadlock guards.** If a worker loops >10 turns without
   modifying a file, pause it and request diagnostics.
 
