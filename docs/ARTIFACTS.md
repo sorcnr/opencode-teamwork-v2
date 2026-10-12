@@ -111,12 +111,43 @@ Resume: re-read `state.json`, skip tasks already `pass`, continue the current
 ### `costs.json`
 
 ```json
-{ "sessionId": "...", "budgetUsd": 20, "spentUsd": 0, "byTask": {}, "updatedAt": "ISO8601" }
+{ "sessionId": "...", "budgetUsd": 20, "budgetSource": "credits|default|manual", "spentUsd": 0, "byTask": {}, "updatedAt": "ISO8601" }
 ```
 
-Cost figures are best-effort. Subagents cannot reliably observe their own token
-usage, so treat worker-reported `cost.json` as an estimate and prefer the
-plugin's session-hook accounting when available.
+When the session uses `opencode/` (managed) models and the `opencode_console`
+MCP is connected, `teamwork_budget` tells the sentinel to derive `budgetUsd`
+from console credits (`opencode_console_get_usage` →
+`min(limitDollars - spentDollars)`), after asking the user whether to use the
+full remaining budget or a partial (half) amount. `budgetSource` records where
+the budget came from.
+
+Cost is read from OpenCode itself, not self-reported. The plugin context is an
+OpenCode server client, so `teamwork_cost` calls `ctx.session.get({ sessionID })`
+and reads the `cost` (USD) and `tokens` fields OpenCode computed from real token
+usage. Deltas between calls are tracked in `snapshots.json`. When the client is
+unavailable (tests, non-OpenCode host) the tool falls back to manual `addUsd`.
+
+### `snapshots.json` — per-session cost baseline for delta tracking
+
+```json
+{
+  "sessionId": "20260112-101500-a1b2",
+  "bySession": {
+    "ses_abc123": {
+      "lastCost": 0.62,
+      "lastTokens": { "input": 1200, "output": 640, "reasoning": 0, "cache": { "read": 300, "write": 40 } },
+      "timestamp": "ISO8601"
+    }
+  }
+}
+```
+
+`lastCost` is the last cumulative cost observed for that OpenCode session.
+Each `teamwork_cost` call computes `delta = current_cost - lastCost`, adds it to
+`costs.json`, then advances `lastCost`. Because the running total is the sum of
+these deltas, cumulative cost is never double-counted (the fix for the old
+over-reporting bug). The sentinel session is baselined in `teamwork_plan`; every
+other session is baselined on its first `teamwork_cost` call.
 
 ### `verify/report-<task>.json` (verifier output)
 

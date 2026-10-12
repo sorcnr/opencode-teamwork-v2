@@ -39,6 +39,7 @@ Look in \`.opencode/teamwork/\` for a recent \`prompt_draft.md\`. If you find on
 
 Then:
 
+0. Budget preflight: call \`teamwork_budget\`. If it reports console-credit budgeting applies (opencode/ models + opencode_console connected), call \`opencode_console_get_usage\`, compute \`remaining = min(limitDollars - spentDollars)\`, and ASK THE USER whether to use the FULL remaining budget or PARTIAL (half). Pass the choice to \`teamwork_plan\` as \`budgetUsd\` with \`budgetSource: "credits"\`.
 1. Load the spec, then call the \`teamwork_plan\` tool to create the run — it returns the canonical \`SESSION_ID\`. Never use a session id read from a file. Provision the sentinel worktree OUTSIDE the repo, quoting both args: \`git worktree add "\${TEAMWORK_WORKTREES_DIR:-../.teamwork-worktrees}/$SESSION_ID/sentinel" -b "teamwork/base-$SESSION_ID"\` (skip if not in a git repo).
 2. Build the DAG in \`.opencode/teamwork/<session-id>/plan.dag.json\`. Independent tasks run in parallel; dependent ones in topological order.
 3. Dispatch workers in topological order. Each gets:
@@ -48,10 +49,11 @@ Then:
 4. Dispatch verifiers against each worker's diff. Aggregated results go in \`.opencode/teamwork/<session-id>/verify/summary.json\`.
 5. If FAIL, send the verifier's \`feedback_for_worker.md\` back to the worker for the next round. Loop until PASS, maxRounds, or budget exhausted.
 6. On full PASS, merge the sentinel worktree back. On partial, present the partial + the open verification reports.
+7. After the run completes (full or partial), spawn a \`team/verifier\` agent to independently verify the final merged result against the spec's acceptance criteria; write its report to \`.opencode/teamwork/$SESSION_ID/verify/final.json\`.
 
 Hard caps (override in the spec if the user asks):
 - 4 rounds per task (6 for proof, 1 for small-focused, 24h for massive-proof)
-- Default $20 session budget (configurable per run)
+- Budget: derived from opencode_console credits when available (full or partial, per the user), else the default $20 session budget
 
 When done, write \`.opencode/teamwork/<session-id>/final.md\` and present. Tell the user:
 - Which topology you chose

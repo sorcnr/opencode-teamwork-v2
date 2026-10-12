@@ -35,47 +35,64 @@ problem yourself. You:
    `small-focused`, `iterative-coding`, `distributed-coding`, `proof`,
    `massive-proof`, `document-review`. Normalize legacy aliases
    (`large-swarm`→`distributed-coding`, `doc-review`→`document-review`).
-3. **Build the DAG.** Call the `teamwork_plan` tool with the topology and the
+3. **Budget preflight (before you plan).** Call `teamwork_budget`. If it
+   reports console-credit budgeting applies (the session uses `opencode/`
+   managed models AND the `opencode_console` MCP is connected), then:
+   - call `opencode_console_get_usage` to read your budgets;
+   - compute `remaining = min over budgets of (limitDollars - spentDollars)`;
+   - **ask the user whether to use the FULL remaining budget or PARTIAL
+     (half)**;
+   - pass the chosen amount as `budgetUsd` (and `budgetSource: "credits"`) to
+     `teamwork_plan`.
+   Otherwise let `teamwork_plan` use the default budget (`budgetSource:
+   "default"`).
+4. **Build the DAG.** Call the `teamwork_plan` tool with the topology and the
    task list (dependencies included). It creates the run directory, writes
    `plan.dag.json` / `state.json` / `costs.json`, and returns the canonical
    `SESSION_ID`. **Use only that value for every path and branch name — never a
    session id read out of a file.** It is safe to interpolate (matches
    `^[0-9A-Za-z._-]+$`); the tool refuses anything else. Independent tasks run
    in parallel.
-4. **Provision the sentinel worktree** outside the repo (nested worktrees are
+5. **Provision the sentinel worktree** outside the repo (nested worktrees are
    a footgun), quoting both arguments:
    `git worktree add "${TEAMWORK_WORKTREES_DIR:-../.teamwork-worktrees}/$SESSION_ID/sentinel" -b "teamwork/base-$SESSION_ID"`
    (skip if not in a git repo). Layout and schemas: `ARTIFACTS.md`.
-5. **Dispatch workers** in topological order. Each worker:
+6. **Dispatch workers** in topological order. Each worker:
    - Gets its own worktree:
      `git worktree add "${TEAMWORK_WORKTREES_DIR:-../.teamwork-worktrees}/$SESSION_ID/agent-N" -b "teamwork/$SESSION_ID-agent-N"`
    - Gets a `spec.json` (schema in `ARTIFACTS.md`)
    - Commits its work; the verifier reads the branch diff
      (`git diff "teamwork/base-$SESSION_ID..teamwork/$SESSION_ID-agent-N"`),
      not a loose patch
-6. **Adversarial verification.** Verifier agents run against worker
+7. **Adversarial verification.** Verifier agents run against worker
    branches. They produce `verification_report.json` per task. Track progress
    with `teamwork_status`; aggregate into
    `.opencode/teamwork/$SESSION_ID/verify/summary.json`.
-7. **Iterate or merge.** If verification fails, log the failure mode with
+8. **Iterate or merge.** If verification fails, log the failure mode with
    `teamwork_pitfall`, send the verifier's report back to the worker, and
    loop. Check the budget with `teamwork_cost` each round. Loop until PASS or
    budget exhausted.
-8. **Checkpoint every state transition.** Keep `state.json` current (the
+9. **Checkpoint every state transition.** Keep `state.json` current (the
    engine tools do this); after a restart call `teamwork_resume` to pick up
    the open tasks. Allows resume after token limits or interruption.
-9. **Merge or present.** On full success, merge the sentinel
-   worktree back to the user's branch. On partial success, present
-   the partial result and the open verification reports.
+10. **Merge or present.** On full success, merge the sentinel
+    worktree back to the user's branch. On partial success, present
+    the partial result and the open verification reports.
+11. **Final verification (after completion).** Once the run completes — full
+    or partial — spawn a dedicated `team/verifier` agent to independently
+    verify the final merged result against the spec's acceptance criteria.
+    Write its report to `.opencode/teamwork/$SESSION_ID/verify/final.json`
+    and surface PASS/FAIL in `final.md`.
 
 ## Tools
 
 The plugin registers these — prefer them over hand-writing files:
 
+- `teamwork_budget` — budget preflight: detects `opencode/` models + connected `opencode_console` and tells you to derive the budget from credits (ask the user full or partial)
 - `teamwork_plan` — create the run dir + `plan.dag.json` / `state.json` / `costs.json`
 - `teamwork_status` — per-task progress for the active run
 - `teamwork_resume` — tasks still open (for a restart)
-- `teamwork_cost` — read/add budget spend (warns at 80%)
+- `teamwork_cost` — read real budget spend from OpenCode's native per-session cost (warns at 80%). Returns per-task breakdown. No manual reporting needed.
 - `teamwork_pitfall` — append to the pitfall registry
 
 ## What you never do
@@ -114,8 +131,10 @@ restarts the sentinel with the same session-id), you re-read
 - **Verifier is read-only on the worker's worktree.** The verifier
   sees the diff, not the conversation. This is the anti-leak
   guarantee.
-- **Token spend is tracked.** Track it with `teamwork_cost`; the tool warns
-  at 80% of budget. Halt non-essential workers and ask the user.
+- **Token spend is tracked automatically.** Call `teamwork_cost` each round — it
+  reads real cost from OpenCode's native per-session cost (no self-reporting).
+  The tool returns per-task breakdowns and warns at 80% of budget. Halt
+  non-essential workers and ask the user.
 - **Deadlock guards.** If a worker loops >10 turns without
   modifying a file, pause it and request diagnostics.
 

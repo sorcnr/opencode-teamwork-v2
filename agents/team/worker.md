@@ -1,5 +1,5 @@
 ---
-description: "Worker — specialized implementation agent. Receives a scoped spec.json + its own git worktree, edits and commits there, returns summary.md + cost.json. Hides itself in the agent menu; only the Sentinel invokes."
+description: "Worker — specialized implementation agent. Receives a scoped spec.json + its own git worktree, edits and commits there, returns summary.md. Hides itself in the agent menu; only the Sentinel invokes."
 mode: subagent
 model: deepseek/deepseek-flash
 color: "#3b82f6"
@@ -57,9 +57,11 @@ You are one worker in a multi-agent team. You receive:
 
 ## Cost reporting
 
-Usage accounting is best-effort — you cannot reliably read your own token
-usage. If you can, write an estimate to `cost.json`; the coordinator tracks
-real spend with the `teamwork_cost` tool.
+Cost is tracked automatically by the `teamwork_cost` tool, which reads the real
+cost OpenCode computed for your session. Do NOT write `cost.json` — it is not
+read. Before you stop, call `teamwork_cost` once with your `taskId` (e.g.
+`teamwork_cost({ taskId: "R1-impl" })`) so your session's spend is attributed to
+your task.
 
 ## What if you are stuck
 

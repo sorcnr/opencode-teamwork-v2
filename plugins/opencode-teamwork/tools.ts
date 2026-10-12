@@ -15,8 +15,134 @@
 // No OpenCode imports: tool definitions are plain objects, so the loader never
 // has to resolve node_modules for this package.
 
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync, appendFileSync } from "node:fs"
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync, appendFileSync, renameSync } from "node:fs"
 import { basename, dirname, isAbsolute, join, relative } from "node:path"
+
+// ---------------------------------------------------------------------------
+// OpenCode native cost tracking
+//
+// The plugin context (`ctx`) is itself an OpenCode server client, so the
+// canonical cost signal is `ctx.session.get({ sessionID })`, whose Session.Info
+// carries `cost` (Money.USD) and `tokens` (TokenUsage.Info) computed by
+// OpenCode from real token usage. We snapshot the cumulative cost per session
+// and report deltas, so a run's spend is measured — never self-reported.
+// When the client is unavailable (tests, non-OpenCode host) we fall back to
+// manual addUsd.
+// ---------------------------------------------------------------------------
+
+interface TokenUsage {
+  input: number
+  output: number
+  reasoning: number
+  cache: { read: number; write: number }
+}
+
+interface SessionSnapshot {
+  /** Last observed cumulative cost for this OpenCode session, in USD. */
+  lastCost: number
+  lastTokens: TokenUsage
+  timestamp: string
+}
+
+interface SnapshotsFile {
+  sessionId: string
+  bySession: Record<string, SessionSnapshot>
+}
+
+function normalizeTokens(t: any): TokenUsage {
+  return {
+    input: Number(t?.input) || 0,
+    output: Number(t?.output) || 0,
+    reasoning: Number(t?.reasoning) || 0,
+    cache: { read: Number(t?.cache?.read) || 0, write: Number(t?.cache?.write) || 0 },
+  }
+}
+
+function readSnapshots(file: string): SnapshotsFile | undefined {
+  try {
+    const parsed = JSON.parse(readFileSync(file, "utf8")) as SnapshotsFile
+    if (!parsed || typeof parsed !== "object" || typeof parsed.bySession !== "object") return undefined
+    return parsed
+  } catch {
+    return undefined
+  }
+}
+
+function writeSnapshots(file: string, value: SnapshotsFile) {
+  refuseSymlink(file)
+  mkdirSync(dirname(file), { recursive: true })
+  const tmp = file + ".tmp"
+  refuseSymlink(tmp)
+  writeFileSync(tmp, JSON.stringify(value, null, 2) + "\n")
+  renameSync(tmp, file)
+}
+
+/**
+ * Read the real cumulative cost + tokens for an OpenCode session from the
+ * plugin client. Returns undefined when the client or session is unavailable
+ * (tests, non-OpenCode host), which switches the cost tool to manual mode.
+ */
+async function readSessionUsage(
+  ctx: any,
+  sessionID: string | undefined,
+): Promise<{ cost: number; tokens: TokenUsage } | undefined> {
+  if (!sessionID || typeof ctx?.session?.get !== "function") return undefined
+  try {
+    const info = await ctx.session.get({ sessionID })
+    if (!info || typeof info.cost !== "number") return undefined
+    return { cost: info.cost, tokens: normalizeTokens(info.tokens) }
+  } catch {
+    return undefined
+  }
+}
+
+/** True when the opencode_console MCP server is connected for this location. */
+async function isConsoleMcpConnected(ctx: any): Promise<boolean> {
+  try {
+    if (typeof ctx?.mcp?.list !== "function") return false
+    const out = await ctx.mcp.list()
+    const servers = Array.isArray(out) ? out : (out?.data ?? [])
+    return servers.some((s: any) => /console/i.test(String(s?.name ?? "")) && s?.status?.status === "connected")
+  } catch {
+    return false
+  }
+}
+
+/** Provider id of a Model.Ref, unwrapping the `{ location, data }` client envelope. */
+function providerOf(value: any): string | undefined {
+  const v = value && typeof value === "object" && "data" in value ? value.data : value
+  return v?.providerID ?? v?.provider ?? undefined
+}
+
+/**
+ * True when the run is on managed `opencode/` models — checked against the
+ * active session's model, the location default model, and every `team/*`
+ * agent's configured model. Any `opencode` provider ⇒ console credits apply.
+ */
+async function usesOpencodeModel(ctx: any, sessionID?: string): Promise<boolean> {
+  // 1. The active session's model.
+  try {
+    if (sessionID && typeof ctx?.session?.get === "function") {
+      const s: any = await ctx.session.get({ sessionID })
+      if (providerOf(s?.model ?? s?.data?.model) === "opencode") return true
+    }
+  } catch {}
+  // 2. The location default model.
+  try {
+    if (typeof ctx?.model?.default === "function") {
+      if (providerOf(await ctx.model.default()) === "opencode") return true
+    }
+  } catch {}
+  // 3. Any team/* agent configured with an opencode/ model.
+  try {
+    if (typeof ctx?.agent?.list === "function") {
+      const out: any = await ctx.agent.list()
+      const agents = Array.isArray(out) ? out : (out?.data ?? [])
+      return agents.some((a: any) => /^team\//.test(String(a?.id ?? a?.name ?? "")) && providerOf(a?.model) === "opencode")
+    }
+  } catch {}
+  return false
+}
 
 const RUN_ROOT = ".opencode/teamwork"
 
@@ -165,13 +291,34 @@ function readJson<T>(file: string, fallback: T): T {
 function writeJson(file: string, value: unknown) {
   refuseSymlink(file)
   mkdirSync(dirname(file), { recursive: true })
-  writeFileSync(file, JSON.stringify(value, null, 2) + "\n")
+  const tmp = file + ".tmp"
+  refuseSymlink(tmp)
+  writeFileSync(tmp, JSON.stringify(value, null, 2) + "\n")
+  renameSync(tmp, file)
 }
 
 function touch(file: string, content: string) {
   refuseSymlink(file)
   mkdirSync(dirname(file), { recursive: true })
   if (!existsSync(file)) writeFileSync(file, content)
+}
+
+// Serialise read-modify-write of a run's cost files within this process, so
+// concurrent agents (parallel workers calling teamwork_cost at once) cannot
+// clobber each other's attribution. Keyed by the file path; the whole async
+// section — including the client read — runs inside the lock.
+const fileLocks = new Map<string, Promise<unknown>>()
+function withFileLock<T>(key: string, fn: () => Promise<T> | T): Promise<T> {
+  const prev = fileLocks.get(key) ?? Promise.resolve()
+  const next = prev.then(fn, fn)
+  fileLocks.set(
+    key,
+    next.then(
+      () => undefined,
+      () => undefined,
+    ),
+  )
+  return next as Promise<T>
 }
 
 /**
@@ -195,9 +342,18 @@ export function describeRun(root: string): string | undefined {
   const id = basename(run)
   if (!SESSION_ID.test(id)) return undefined // never inject a non-conforming dir name
   const phase = PHASES.has(state.phase) ? state.phase : "UNKNOWN"
+  const costs = readJson<any>(join(run, "costs.json"), undefined)
+  let costLine = "Cost: unknown."
+  if (costs && typeof costs.budgetUsd === "number") {
+    const budget = costs.budgetUsd
+    const spent = Number(costs.spentUsd) || 0
+    const pct = budget ? Math.floor((spent / budget) * 100) : 0
+    costLine = `Cost: $${spent} of $${budget} (${pct}%)${pct >= 80 ? " — near budget, halt non-essential workers" : ""}.`
+  }
   return [
     `[teamwork] active run ${id} — phase ${phase}.`,
     `Tasks: ${pass}/${tasks.length} pass, ${fail} fail. Open pitfalls: ${pitfalls}.`,
+    costLine,
     `State: ${join(runsDir(root), id, "state.json")} (read it before dispatching).`,
   ].join("\n")
 }
@@ -219,7 +375,8 @@ export async function registerTeamworkTools(ctx: any, root: string) {
         properties: {
           sessionId: { type: "string", description: "Reuse an existing session id; omit to create one." },
           topology: { type: "string", description: "small-focused | iterative-coding | distributed-coding | proof | massive-proof | document-review" },
-          budgetUsd: { type: "number" },
+          budgetUsd: { type: "number", description: "Run budget in USD. When using opencode/ models + opencode_console, derive this from credits (full or partial, per the user's choice)." },
+          budgetSource: { type: "string", description: "Where the budget came from: credits | default | manual." },
           tasks: {
             type: "array",
             items: {
@@ -239,7 +396,7 @@ export async function registerTeamworkTools(ctx: any, root: string) {
         required: ["topology", "tasks"],
         additionalProperties: false,
       },
-      execute: async (input: any) => {
+      execute: async (input: any, context: any) => {
         const sessionId = input.sessionId || newSessionId()
         const resolved = resolveRun(root, sessionId)
         if (resolved.error) return { content: resolved.error }
@@ -264,9 +421,54 @@ export async function registerTeamworkTools(ctx: any, root: string) {
             updatedAt: new Date().toISOString(),
           })
         }
-        touch(join(run, "costs.json"), JSON.stringify({ sessionId, budgetUsd: Number(input.budgetUsd) || 20, spentUsd: 0, byTask: {}, updatedAt: new Date().toISOString() }, null, 2) + "\n")
+        // Use ?? (nullish coalescing) so budgetUsd: 0 is respected as "no budget"
+        const budget = input.budgetUsd ?? 20
+        const costsFile = join(run, "costs.json")
+        const callSession = context?.sessionID
+        // Same lock as the cost tool so a re-plan cannot race a concurrent cost call.
+        await withFileLock(costsFile, async () => {
+          const existing = readJson<any>(costsFile, undefined)
+          if (!existing) {
+            writeJson(costsFile, {
+              sessionId,
+              budgetUsd: budget,
+              budgetSource: input.budgetSource ? clean(input.budgetSource, 32) : "default",
+              spentUsd: 0,
+              byTask: {},
+              updatedAt: new Date().toISOString(),
+            })
+          } else if (
+            existing.budgetUsd !== budget ||
+            (input.budgetSource && existing.budgetSource !== clean(input.budgetSource, 32))
+          ) {
+            // Update the budget/source but PRESERVE accumulated spend and
+            // per-task buckets (a re-plan must not wipe the run's measured cost).
+            existing.budgetUsd = budget
+            if (input.budgetSource) existing.budgetSource = clean(input.budgetSource, 32)
+            existing.updatedAt = new Date().toISOString()
+            writeJson(costsFile, existing)
+          }
+          // Establish the native cost baseline for the calling session, preserving
+          // any baselines already recorded for other sessions (merge, don't clobber).
+          const now = new Date().toISOString()
+          const usage = await readSessionUsage(ctx, callSession)
+          const snaps = readSnapshots(join(run, "snapshots.json")) ?? { sessionId, bySession: {} }
+          snaps.sessionId = sessionId
+          if (callSession && usage && !snaps.bySession[callSession]) {
+            snaps.bySession[callSession] = { lastCost: usage.cost, lastTokens: usage.tokens, timestamp: now }
+          }
+          writeSnapshots(join(run, "snapshots.json"), snaps)
+        })
         touch(join(run, "pitfalls.md"), "# Pitfalls\n\n_answer-agnostic failure modes; one per line_\n")
-        return { content: `Planned ${tasks.length} task(s).\nSESSION_ID: ${sessionId}\nRun dir: ${run}\nplan.dag.json + state.json + costs.json written.` }
+        // Backstop: if console credits apply but the budget wasn't derived from
+        // them, warn (advisory — the sentinel is instructed to run the preflight).
+        let creditWarning = ""
+        if (input.budgetSource !== "credits" && (await isConsoleMcpConnected(ctx)) && (await usesOpencodeModel(ctx, context?.sessionID))) {
+          creditWarning = "\n⚠ opencode/ models + opencode_console connected — run teamwork_budget and derive budgetUsd from credits before dispatching."
+        }
+        return {
+          content: `Planned ${tasks.length} task(s).\nSESSION_ID: ${sessionId}\nRun dir: ${run}\nBudget: $${budget} (source: ${input.budgetSource ? clean(input.budgetSource, 32) : "default"})\nplan.dag.json + state.json + costs.json written.${creditWarning}`,
+        }
       },
     })
 
@@ -305,26 +507,101 @@ export async function registerTeamworkTools(ctx: any, root: string) {
 
     editor.add({
       name: "cost",
-      description: "Read the run budget and optionally add a spend amount. Warns at 80%.",
+      description:
+        "Read the run budget and report real spend. Uses OpenCode's native per-session cost (ctx.session.get) and reports the delta since the last check; falls back to manual addUsd when the client is unavailable. Warns at 80%.",
       input: { type: "object", properties: { sessionId: { type: "string" }, addUsd: { type: "number" }, taskId: { type: "string" } }, additionalProperties: false },
-      execute: async (input: any) => {
+      execute: async (input: any, context: any) => {
         const resolved = resolveRun(root, input?.sessionId)
         if (resolved.error) return { content: resolved.error }
         const run = resolved.run as string
         const file = join(run, "costs.json")
-        const costs = readJson<any>(file, { budgetUsd: 20, spentUsd: 0, byTask: {} })
-        if (typeof input?.addUsd === "number" && Number.isFinite(input.addUsd)) {
-          costs.spentUsd = Math.round(((costs.spentUsd || 0) + input.addUsd) * 1e4) / 1e4
-          if (input.taskId) {
-            const key = clean(input.taskId, 64)
-            costs.byTask[key] = Math.round(((costs.byTask[key] || 0) + input.addUsd) * 1e4) / 1e4
+        const snapshotsFile = join(run, "snapshots.json")
+
+        const callSession = typeof context?.sessionID === "string" ? context.sessionID : undefined
+
+        // Serialise the whole read-modify-write (including the client read) so
+        // parallel workers cannot lose each other's attribution.
+        return await withFileLock(file, async () => {
+          const costs = readJson<any>(file, undefined)
+          if (!costs || typeof costs !== "object") {
+            return { content: `No costs.json for run ${basename(run)} — call teamwork_plan first.` }
           }
-          costs.updatedAt = new Date().toISOString()
-          writeJson(file, costs)
+          costs.byTask = costs.byTask && typeof costs.byTask === "object" ? costs.byTask : {}
+          const budget = costs.budgetUsd ?? 20
+          const usage = await readSessionUsage(ctx, callSession)
+
+          // Attribute every dollar to a bucket so sum(byTask) === spentUsd holds
+          // by construction — no drift between the per-task view and the total.
+          const bucket = input.taskId ? clean(input.taskId, 64) : "_unattributed"
+          const addToBucket = (amount: number) => {
+            costs.byTask[bucket] = Math.round(((costs.byTask[bucket] || 0) + amount) * 1e4) / 1e4
+            costs.spentUsd =
+              Math.round(Object.values(costs.byTask).reduce((a: number, b: any) => a + (Number(b) || 0), 0) * 1e4) / 1e4
+            costs.updatedAt = new Date().toISOString()
+            writeJson(file, costs)
+          }
+
+          let source: string
+          if (usage && callSession) {
+            // Native path: real, OpenCode-computed cost. Report the delta since we
+            // last observed this session so cumulative cost is never double-counted.
+            const snaps = readSnapshots(snapshotsFile) ?? { sessionId: basename(run), bySession: {} }
+            const prev = snaps.bySession[callSession]
+            // No prior baseline (e.g. a worker session created mid-run): attribute
+            // the session's full cost, since it started at $0. When a baseline
+            // exists (the sentinel, baselined in plan) attribute only the delta.
+            const delta = prev
+              ? Math.round((usage.cost - prev.lastCost) * 1e4) / 1e4
+              : Math.round(usage.cost * 1e4) / 1e4
+            snaps.bySession[callSession] = { lastCost: usage.cost, lastTokens: usage.tokens, timestamp: new Date().toISOString() }
+            writeSnapshots(snapshotsFile, snaps)
+            if (delta > 0) addToBucket(delta)
+            source = `opencode session ${callSession}`
+          } else if (typeof input?.addUsd === "number" && Number.isFinite(input.addUsd)) {
+            if (input.addUsd < 0) return { content: "Error: addUsd must be non-negative" }
+            addToBucket(input.addUsd)
+            source = "manual (client unavailable)"
+          } else {
+            source = "manual (client unavailable)"
+          }
+
+          const pct = budget ? Math.floor((costs.spentUsd / budget) * 100) : 0
+          const warn = pct >= 80 ? `\n⚠ ${pct}% of budget used — halt non-essential workers and ask the user.` : ""
+          const taskBreakdown = Object.entries(costs.byTask).map(([k, v]) => `    ${k}: $${v}`).join("\n")
+          return {
+            content: `Budget: $${budget} · spent: $${costs.spentUsd} (${pct}%)${warn}${taskBreakdown ? `\nPer-task:\n${taskBreakdown}` : ""}\n(source: ${source})`,
+            shouldHalt: pct >= 80,
+            pct,
+          }
+        })
+      },
+    })
+
+    editor.add({
+      name: "budget",
+      description:
+        "Preflight the run budget BEFORE teamwork_plan. Detects whether the session uses opencode/ (managed) models and whether the opencode_console MCP is connected. When both hold, tells the caller to fetch credits via opencode_console_get_usage and pass a full/partial budgetUsd to teamwork_plan. Otherwise, use the default budget.",
+      input: { type: "object", properties: {}, additionalProperties: false },
+      execute: async (_input: any, context: any) => {
+        const consoleOnline = await isConsoleMcpConnected(ctx)
+        const opencodeModel = await usesOpencodeModel(ctx, context?.sessionID)
+        if (consoleOnline && opencodeModel) {
+          return {
+            content: [
+              "Budget preflight: opencode/ (managed) models detected AND opencode_console is connected.",
+              "1. Call opencode_console_get_usage to read your budgets.",
+              "2. remaining = min over budgets of (limitDollars - spentDollars).",
+              "3. ASK THE USER: use the FULL remaining budget, or PARTIAL (half)?",
+              "4. Pass the chosen budgetUsd to teamwork_plan.",
+              "budgetSource: credits",
+            ].join("\n"),
+            applyCredits: true,
+          }
         }
-        const pct = costs.budgetUsd ? Math.round((costs.spentUsd / costs.budgetUsd) * 100) : 0
-        const warn = pct >= 80 ? `\n⚠ ${pct}% of budget used — halt non-essential workers and ask the user.` : ""
-        return { content: `Budget: $${costs.budgetUsd} · spent: $${costs.spentUsd} (${pct}%)${warn}` }
+        return {
+          content: `Budget preflight: console-credit budgeting does not apply (consoleOnline=${consoleOnline}, opencodeModel=${opencodeModel}). Use the default budget.`,
+          applyCredits: false,
+        }
       },
     })
 
