@@ -14,6 +14,7 @@ import {
   TEAM_AGENTS,
   resolveConfigDir,
   readModelMap,
+  readRawModelMap,
   writeModelMap,
   installAgents,
   registerPlugin,
@@ -149,7 +150,8 @@ async function run(options, { register }) {
 
 function status(options) {
   const configDir = resolveConfigDir(options.configDir)
-  const models = readModelMap(configDir)
+  const hasMap = existsSync(modelMapPath(configDir))
+  const models = hasMap ? readRawModelMap(configDir) : {}
   const configFile = findConfigFile(configDir)
   console.log(`Config dir : ${configDir}`)
   console.log(`Config file: ${configFile || "(none — would create opencode.json)"}`)

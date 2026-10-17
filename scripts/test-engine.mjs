@@ -1,6 +1,7 @@
 import { registerTeamworkTools } from "../plugins/opencode-teamwork/tools.ts"
 import { listTeamworkRuns, inspectTeamworkRun, pruneTeamworkWorktrees } from "../lib/runs.mjs"
-import { mkdtempSync, rmSync, writeFileSync, existsSync } from "node:fs"
+import { currentModels, readRawModelMap, writeModelMap, installAgents, DEFAULT_MODELS } from "../lib/team.mjs"
+import { mkdtempSync, rmSync, writeFileSync, existsSync, mkdirSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { execFileSync } from "node:child_process"
@@ -328,6 +329,30 @@ try {
   assert(inspected.pitfalls.length > 0, "Pitfalls should be included")
 
   console.log("✓ CLI run management helpers verified")
+
+  // ==========================================
+  // Part 5: Model Map Priority Resolution
+  // ==========================================
+  console.log("Testing Model Map Priority Resolution (teamwork.json vs agent files)...")
+  const configTestDir = mkdtempSync(join(tmpdir(), "teamwork-config-test-"))
+  try {
+    const agentsDir = join(configTestDir, "agents", "team")
+    mkdirSync(agentsDir, { recursive: true })
+    writeFileSync(join(agentsDir, "sentinel.md"), "---\nmodel: old-provider/old-model\n---\n")
+
+    // Without teamwork.json, file model takes precedence over default
+    const modelsFromFile = currentModels(configTestDir)
+    assert.strictEqual(modelsFromFile["team/sentinel"], "old-provider/old-model")
+
+    // When teamwork.json has custom override, it must take precedence over agent file
+    writeModelMap(configTestDir, { "team/sentinel": "new-provider/new-model" })
+    const modelsFromConfig = currentModels(configTestDir)
+    assert.strictEqual(modelsFromConfig["team/sentinel"], "new-provider/new-model")
+
+    console.log("✓ Model map priority resolution verified (teamwork.json > agent files > defaults)")
+  } finally {
+    rmSync(configTestDir, { recursive: true, force: true })
+  }
 } finally {
   rmSync(testDir, { recursive: true, force: true })
 }
