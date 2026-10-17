@@ -25,6 +25,7 @@ import {
 } from "../lib/team.mjs"
 import { detectAvailableModels, pickModels, applyOverrides } from "../lib/picker.mjs"
 import { listTeamworkRuns, inspectTeamworkRun, pruneTeamworkWorktrees } from "../lib/runs.mjs"
+import { runDoctor } from "../lib/doctor.mjs"
 
 const HELP = `opencode-teamwork-v2
 
@@ -38,6 +39,7 @@ Commands:
   runs       List active and past Teamwork runs in .opencode/teamwork/
   inspect    Inspect DAG, task progress, security report and costs for a run
   prune      Prune git worktrees for completed Teamwork runs
+  doctor     Diagnose config, agents, model sync and git/worktree health
   help       Show this help
 
 Options:
@@ -45,6 +47,7 @@ Options:
       --all <model>      Use one model for every agent (e.g. anthropic/claude-sonnet-4-5)
       --model <id>=<m>   Override one agent (repeatable), id may omit the "team/" prefix
       --session <id>     Target a specific session ID (for inspect or prune)
+      --json             Print doctor output as raw JSON (for doctor)
       --no-register      Don't touch opencode.json(c)
       --refresh          Overwrite agent prompt bodies with the shipped versions
                          (keeps your model choices; backs up the old files)
@@ -54,7 +57,7 @@ Options:
 `
 
 function parseArgs(argv) {
-  const options = { command: undefined, yes: false, all: undefined, assignments: {}, register: true, dryRun: false, refresh: false, configDir: undefined, session: undefined, help: false }
+  const options = { command: undefined, yes: false, all: undefined, assignments: {}, register: true, dryRun: false, refresh: false, configDir: undefined, session: undefined, json: false, help: false }
   const rest = [...argv]
   options.command = rest.shift()
   while (rest.length) {
@@ -88,6 +91,9 @@ function parseArgs(argv) {
         break
       case "--refresh":
         options.refresh = true
+        break
+      case "--json":
+        options.json = true
         break
       case "-h":
       case "--help":
@@ -268,6 +274,36 @@ function pruneCommand(options) {
   }
 }
 
+const DOCTOR_INDICATORS = { pass: "[✓]", warn: "[!]", fail: "[✗]" }
+
+function doctorCommand(options) {
+  const configDir = resolveConfigDir(options.configDir)
+  const report = runDoctor({ configDir, cwd: process.cwd() })
+
+  if (options.json) {
+    console.log(JSON.stringify(report, null, 2))
+    process.exitCode = report.ok ? 0 : 1
+    return
+  }
+
+  console.log("opencode-teamwork doctor")
+  console.log(`Config dir: ${configDir}\n`)
+  for (const check of report.checks) {
+    const indicator = DOCTOR_INDICATORS[check.status] || DOCTOR_INDICATORS.fail
+    console.log(`${indicator} ${check.name.padEnd(20)} ${check.message}`)
+  }
+
+  const failed = report.checks.filter((check) => check.status === "fail").length
+  const warned = report.checks.filter((check) => check.status === "warn").length
+  console.log("")
+  if (report.ok) {
+    console.log(warned ? `Environment looks healthy (${warned} warning(s)).` : "Environment looks healthy.")
+  } else {
+    console.log(`Environment has ${failed} failing check(s)${warned ? ` and ${warned} warning(s)` : ""}.`)
+  }
+  process.exitCode = report.ok ? 0 : 1
+}
+
 async function main() {
   const options = parseArgs(process.argv.slice(2))
   const command = options.command || (options.help ? "help" : "init")
@@ -276,7 +312,7 @@ async function main() {
     console.log(HELP)
     return
   }
-  if (!["init", "models", "install", "status", "runs", "inspect", "prune"].includes(command)) {
+  if (!["init", "models", "install", "status", "runs", "inspect", "prune", "doctor"].includes(command)) {
     console.error(`Unknown command: ${command}\n`)
     console.log(HELP)
     process.exitCode = 1
@@ -287,6 +323,7 @@ async function main() {
   if (command === "runs") return runsCommand()
   if (command === "inspect") return inspectCommand(options)
   if (command === "prune") return pruneCommand(options)
+  if (command === "doctor") return doctorCommand(options)
   if (command === "install") {
     options.yes = true
     return run(options, { register: options.register })
