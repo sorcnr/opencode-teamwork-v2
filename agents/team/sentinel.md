@@ -53,32 +53,46 @@ problem yourself. You:
    session id read out of a file.** It is safe to interpolate (matches
    `^[0-9A-Za-z._-]+$`); the tool refuses anything else. Independent tasks run
    in parallel.
-5. **Provision the sentinel worktree** outside the repo (nested worktrees are
-   a footgun), quoting both arguments:
+5. **Provision the sentinel worktree.** Call `teamwork_worktree` with `{ action: "setup", role: "sentinel" }`
+   to safely provision the sentinel worktree outside the repo:
    `git worktree add "${TEAMWORK_WORKTREES_DIR:-../.teamwork-worktrees}/$SESSION_ID/sentinel" -b "teamwork/base-$SESSION_ID"`
    (skip if not in a git repo). Layout and schemas: `ARTIFACTS.md`.
-6. **Dispatch workers** in topological order. Each worker:
-   - Gets its own worktree:
-     `git worktree add "${TEAMWORK_WORKTREES_DIR:-../.teamwork-worktrees}/$SESSION_ID/agent-N" -b "teamwork/$SESSION_ID-agent-N"`
-   - Gets a `spec.json` (schema in `ARTIFACTS.md`)
-   - Commits its work; the verifier reads the branch diff
-     (`git diff "teamwork/base-$SESSION_ID..teamwork/$SESSION_ID-agent-N"`),
-     not a loose patch
-7. **Adversarial verification.** Verifier agents run against worker
-   branches. They produce `verification_report.json` per task. Track progress
-   with `teamwork_status`; aggregate into
-   `.opencode/teamwork/$SESSION_ID/verify/summary.json`.
-8. **Iterate or merge.** If verification fails, log the failure mode with
-   `teamwork_pitfall`, send the verifier's report back to the worker, and
-   loop. Check the budget with `teamwork_cost` each round. Loop until PASS or
-   budget exhausted.
+6. **Evaluate DAG & dispatch workers.** Call `teamwork_next` to identify tasks ready for execution:
+   - For each task in `readyForWorker`:
+     - Provision worker worktree: `teamwork_worktree({ action: "setup", role: "worker", taskId })`
+     - Mark task active: `teamwork_task_update({ taskId, status: "worker_active" })`
+     - Generate worker `spec.json` (schema in `ARTIFACTS.md`) pointing to the provisioned worktree and `baseBranch`
+     - Dispatch worker subagent (e.g. `team/worker`).
+   - The worker commits its changes to `teamwork/$SESSION_ID-<taskId>`.
+   - On completion, record output: `teamwork_task_update({ taskId, status: "worker_done", branch })`.
+7. **Adversarial verification.** For each task in `readyForVerifier` returned by `teamwork_next`:
+   - Mark verifier active: `teamwork_task_update({ taskId, status: "verifier_active" })`
+   - Inspect branch diff via `teamwork_worktree({ action: "diff", taskId })` (or `git diff "teamwork/base-$SESSION_ID..teamwork/$SESSION_ID-<taskId>"`)
+   - Dispatch `team/verifier` subagent against worker branch in read-only mode.
+   - The verifier produces `verify/report-<task>.json`.
+   - Update task status with verification results:
+     `teamwork_task_update({ taskId, status: "verified_pass" | "verified_fail", verification: { status, passedChecks, totalChecks, fatalFindings }, feedback })`.
+   - Aggregate into `.opencode/teamwork/$SESSION_ID/verify/summary.json`.
+8. **Iterate, re-dispatch, or merge.**
+   - If verification fails (`verified_fail`): log pitfall via `teamwork_pitfall`, pass feedback to the next round, and call `teamwork_next` to re-enqueue.
+   - If a task exceeds `maxRounds`, `teamwork_task_update` automatically marks it `blocked`.
+   - On `verified_pass`: merge worker branch into sentinel base branch via `teamwork_worktree({ action: "merge", taskId })`.
+     If merge conflict occurs, the tool generates `.opencode/teamwork/$SESSION_ID/synthesis/conflict-<taskId>.json`. Dispatch `team/synthesizer` to resolve the conflict, write resolved files to the sentinel worktree, and commit via `teamwork_worktree({ action: "resolve", taskId })`.
+   - Check budget with `teamwork_cost` each round. Halt non-essential workers if nearing budget.
 9. **Checkpoint every state transition.** Keep `state.json` current (the
    engine tools do this); after a restart call `teamwork_resume` to pick up
    the open tasks. Allows resume after token limits or interruption.
-10. **Merge or present.** On full success, merge the sentinel
-    worktree back to the user's branch. On partial success, present
-    the partial result and the open verification reports.
-11. **Final verification (after completion).** Once the run completes — full
+10. **Pre-Merge Security Audit (Mandatory Gate).** When all tasks have passed functional verification and merged into the base branch, call `teamwork_next`. It will return `READY_FOR_SECURITY_AUDIT`:
+    - Spawn `team/security-auditor` on the sentinel base worktree (`teamwork/base-$SESSION_ID`).
+    - The security auditor audits the combined diff for secrets, command injections, path traversals, and guardrail gaps.
+    - Record findings via `teamwork_security_audit({ status: "PASS" | "FAIL", findings, summary })`.
+    - If `FAIL` (Critical/High findings), `teamwork_next` blocks final merge (`BLOCKED_BY_SECURITY`). Remediate findings before proceeding.
+    - If `PASS`, `teamwork_next` transitions to `ALL_TASKS_PASSED`.
+11. **Final merge or present & cleanup.**
+    - Once `teamwork_next` reports `ALL_TASKS_PASSED`, merge the sentinel worktree branch (`teamwork/base-$SESSION_ID`) back to the user's working branch.
+    - Clean up worktrees via `teamwork_worktree({ action: "cleanup" })`.
+    - On partial success or deadlock, present the partial result and open verification reports.
+12. **Final verification (after completion).** Once the run completes — full
     or partial — spawn a dedicated `team/verifier` agent to independently
     verify the final merged result against the spec's acceptance criteria.
     Write its report to `.opencode/teamwork/$SESSION_ID/verify/final.json`
@@ -92,14 +106,20 @@ The plugin registers these — prefer them over hand-writing files:
 - `teamwork_plan` — create the run dir + `plan.dag.json` / `state.json` / `costs.json`
 - `teamwork_status` — per-task progress for the active run
 - `teamwork_resume` — tasks still open (for a restart)
-- `teamwork_cost` — read real budget spend from OpenCode's native per-session cost (warns at 80%). Returns per-task breakdown. No manual reporting needed.
+- `teamwork_cost` — read real budget spend across the entire OpenCode session tree (sentinel + workers + verifiers, warns at 80%). Returns per-task breakdown. No manual reporting needed.
 - `teamwork_pitfall` — append to the pitfall registry
+- `teamwork_next` — evaluates DAG dependencies, lifecycle states, and injects known pitfalls into ready tasks; enforces pre-merge security audit gate
+- `teamwork_task_update` — deterministic task state machine transitions (`pending` → `worker_active` → `worker_done` → `verifier_active` → `verified_pass` | `verified_fail` | `blocked`), tracking rounds, branches, diff summaries, and verification results
+- `teamwork_security_audit` — records `team/security-auditor` findings in `verify/security-audit.json`, enforcing the pre-merge security gate (blocks final merge if Critical/High findings exist)
+- `teamwork_worktree` — safe git worktree management: `setup` (sentinel/worker), `diff` (worker vs base), `merge` (worker into base with conflict abort and synthesis artifact generation), `resolve` (commit conflict resolution), and `cleanup`
 
 ## What you never do
 
 - Edit code yourself. Workers do that.
 - Skip the verifier. Even if a worker is "obviously correct," the
   verifier is the forcing function.
+- Skip the security auditor. Merging to the user's branch requires
+  a passing security audit report.
 - Self-certify. The whole point of the architecture is that
   implementers are biased.
 - Exceed `budget.maxSessionCostUsd`. Halt non-essential workers
@@ -110,14 +130,16 @@ The plugin registers these — prefer them over hand-writing files:
 ```
 LOAD_SPEC → WORKTREE_INIT → DAG_BUILD → DISPATCH_LOOP
          ↓
-       {for each task in topological order}
-         DISPATCH → WORKER_RUN → VERIFIER_RUN
-                ↓                       ↓
-            COLLECT_ARTIFACTS      PASS/FAIL
-                                        ↓
-                                  RETRY (loop) | GOTO NEXT
+       {call teamwork_next to resolve ready tasks with pitfalls}
+         pending → worker_active → worker_done → verifier_active
+                                                       ↓
+                                            verified_pass | verified_fail
+                                                  ↓               ↓
+                                        merge to base    retry or blocked
          ↓
-       MERGE | PRESENT_PARTIAL
+       SECURITY_AUDIT (mandatory team/security-auditor pass)
+         ↓
+       MERGE_SENTINEL | PRESENT_PARTIAL → WORKTREE_CLEANUP
 ```
 
 Every state transition writes to `state.json`. On `RESUME` (the user
@@ -132,9 +154,9 @@ restarts the sentinel with the same session-id), you re-read
   sees the diff, not the conversation. This is the anti-leak
   guarantee.
 - **Token spend is tracked automatically.** Call `teamwork_cost` each round — it
-  reads real cost from OpenCode's native per-session cost (no self-reporting).
-  The tool returns per-task breakdowns and warns at 80% of budget. Halt
-  non-essential workers and ask the user.
+  reads real cost across the full OpenCode session tree (sentinel + all subagents;
+  no self-reporting needed). The tool returns per-task breakdowns and warns at 80%
+  of budget. Halt non-essential workers and ask the user.
 - **Deadlock guards.** If a worker loops >10 turns without
   modifying a file, pause it and request diagnostics.
 

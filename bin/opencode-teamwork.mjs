@@ -23,6 +23,7 @@ import {
   modelMapPath,
 } from "../lib/team.mjs"
 import { detectAvailableModels, pickModels, applyOverrides } from "../lib/picker.mjs"
+import { listTeamworkRuns, inspectTeamworkRun, pruneTeamworkWorktrees } from "../lib/runs.mjs"
 
 const HELP = `opencode-teamwork-v2
 
@@ -33,12 +34,16 @@ Commands:
   models     Same as init but never edits opencode.json
   install    Non-interactive install using defaults / flags
   status     Show config dir, model map, installed agents and plugin state
+  runs       List active and past Teamwork runs in .opencode/teamwork/
+  inspect    Inspect DAG, task progress, security report and costs for a run
+  prune      Prune git worktrees for completed Teamwork runs
   help       Show this help
 
 Options:
   -y, --yes              Accept current/default models without prompting
       --all <model>      Use one model for every agent (e.g. anthropic/claude-sonnet-4-5)
       --model <id>=<m>   Override one agent (repeatable), id may omit the "team/" prefix
+      --session <id>     Target a specific session ID (for inspect or prune)
       --no-register      Don't touch opencode.json(c)
       --refresh          Overwrite agent prompt bodies with the shipped versions
                          (keeps your model choices; backs up the old files)
@@ -48,7 +53,7 @@ Options:
 `
 
 function parseArgs(argv) {
-  const options = { command: undefined, yes: false, all: undefined, assignments: {}, register: true, dryRun: false, refresh: false, configDir: undefined, help: false }
+  const options = { command: undefined, yes: false, all: undefined, assignments: {}, register: true, dryRun: false, refresh: false, configDir: undefined, session: undefined, help: false }
   const rest = [...argv]
   options.command = rest.shift()
   while (rest.length) {
@@ -59,7 +64,10 @@ function parseArgs(argv) {
         options.yes = true
         break
       case "--all":
-        options.all = rest.shift()
+        options.all = rest.shift() || true
+        break
+      case "--session":
+        options.session = rest.shift()
         break
       case "--model": {
         const pair = rest.shift() || ""
@@ -85,7 +93,11 @@ function parseArgs(argv) {
         options.help = true
         break
       default:
-        if (arg) console.warn(`Ignoring unknown argument: ${arg}`)
+        if (arg && !options.session && (options.command === "inspect" || options.command === "prune") && !arg.startsWith("-")) {
+          options.session = arg
+        } else if (arg) {
+          console.warn(`Ignoring unknown argument: ${arg}`)
+        }
     }
   }
   return options
@@ -160,6 +172,100 @@ function status(options) {
   console.log(`\nModel map  : ${modelMapPath(configDir)} (${existsSync(modelMapPath(configDir)) ? "present" : "not written"})`)
 }
 
+function runsCommand() {
+  const runs = listTeamworkRuns(process.cwd())
+  if (!runs.length) {
+    console.log("No Teamwork runs found in .opencode/teamwork/")
+    return
+  }
+
+  console.log(`Teamwork Runs (${runs.length}):\n`)
+  console.log(
+    "SESSION ID".padEnd(26) +
+    "PHASE".padEnd(16) +
+    "TOPOLOGY".padEnd(20) +
+    "TASKS".padEnd(12) +
+    "SECURITY".padEnd(14) +
+    "COST ($)"
+  )
+  console.log("-".repeat(96))
+
+  for (const r of runs) {
+    const tasks = `${r.tasksPassed}/${r.tasksTotal}${r.tasksBlocked ? ` (${r.tasksBlocked} blk)` : ""}`
+    const cost = `$${r.spentUsd} / $${r.budgetUsd}`
+    console.log(
+      r.sessionId.padEnd(26) +
+      r.phase.padEnd(16) +
+      r.topology.padEnd(20) +
+      tasks.padEnd(12) +
+      r.securityStatus.padEnd(14) +
+      cost
+    )
+  }
+}
+
+function inspectCommand(options) {
+  const result = inspectTeamworkRun(process.cwd(), options.session)
+  if (result.error) {
+    console.error(result.error)
+    process.exitCode = 1
+    return
+  }
+
+  const { run, tasks, costs, audit, pitfalls, conflicts } = result
+  console.log(`Teamwork Run: ${run.sessionId}`)
+  console.log(`Topology    : ${run.topology}`)
+  console.log(`Phase       : ${run.phase}`)
+  console.log(`Cost        : $${run.spentUsd} / $${run.budgetUsd} (source: ${costs?.budgetSource || "default"})`)
+  console.log(`Updated At  : ${run.updatedAt}`)
+
+  console.log(`\nTasks (${Object.keys(tasks).length}):`)
+  for (const [id, t] of Object.entries(tasks)) {
+    const round = t?.round ? `round ${t.round}` : "round 0"
+    const branch = t?.branch ? `[${t.branch}]` : ""
+    console.log(`  ${id.padEnd(20)} : ${String(t?.status || "pending").padEnd(16)} (${round}) ${branch}`)
+    if (t?.summary) console.log(`    Summary : ${t.summary}`)
+    if (t?.feedback) console.log(`    Feedback: ${t.feedback}`)
+  }
+
+  console.log(`\nSecurity Audit:`)
+  if (!audit) {
+    console.log(`  Not yet run (phase: ${run.phase})`)
+  } else {
+    console.log(`  Status  : ${audit.status}`)
+    console.log(`  Summary : ${audit.summary || "No summary"}`)
+    if (audit.severityCounts) {
+      console.log(`  Findings: ${audit.severityCounts.critical || 0} Critical, ${audit.severityCounts.high || 0} High, ${audit.severityCounts.medium || 0} Medium, ${audit.severityCounts.low || 0} Low`)
+    }
+  }
+
+  if (conflicts.length) {
+    console.log(`\nMerge Conflicts (${conflicts.length}):`)
+    for (const c of conflicts) {
+      console.log(`  - Task ${c.taskId}: ${c.conflictingFiles?.join(", ") || "conflicts recorded"}`)
+    }
+  }
+
+  if (pitfalls.length) {
+    console.log(`\nPitfalls (${pitfalls.length}):`)
+    for (const p of pitfalls.slice(-5)) {
+      console.log(`  ${p}`)
+    }
+  }
+}
+
+function pruneCommand(options) {
+  const res = pruneTeamworkWorktrees(process.cwd(), {
+    all: Boolean(options.all),
+    sessionId: options.session,
+  })
+  if (!res.count) {
+    console.log("No worktrees were pruned.")
+  } else {
+    console.log(`Pruned ${res.count} worktree directory(s): ${res.removed.join(", ")}`)
+  }
+}
+
 async function main() {
   const options = parseArgs(process.argv.slice(2))
   const command = options.command || (options.help ? "help" : "init")
@@ -168,7 +274,7 @@ async function main() {
     console.log(HELP)
     return
   }
-  if (!["init", "models", "install", "status"].includes(command)) {
+  if (!["init", "models", "install", "status", "runs", "inspect", "prune"].includes(command)) {
     console.error(`Unknown command: ${command}\n`)
     console.log(HELP)
     process.exitCode = 1
@@ -176,6 +282,9 @@ async function main() {
   }
 
   if (command === "status") return status(options)
+  if (command === "runs") return runsCommand()
+  if (command === "inspect") return inspectCommand(options)
+  if (command === "prune") return pruneCommand(options)
   if (command === "install") {
     options.yes = true
     return run(options, { register: options.register })

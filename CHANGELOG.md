@@ -4,6 +4,37 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.2] - 2026-10-18
+
+### Added
+
+- **Complete OpenCode session tree consumption tracking**: `teamwork_cost` and
+  `teamwork_plan` now discover and aggregate the entire OpenCode session tree
+  (root Sentinel session + all spawned child/subagent sessions, including
+  `team/worker`, `team/verifier`, `team/scout`, and adversaries) using OpenCode's
+  native SQLite database (`session_v2` recursive query) and background service API.
+- Subagent consumptions (such as verifier rounds using frontier models) are no
+  longer ignored or lost if a worker halts without calling `teamwork_cost`.
+- Added aggregate token usage tracking (`costs.tokens`) across all sessions in
+  the tree.
+- **Deterministic DAG & Worktree Engine Tools**:
+  - `teamwork_next`: Evaluates DAG dependencies and task states to determine ready tasks (`readyForWorker`, `readyForVerifier`), in-progress tasks, injects known pitfalls (`avoidPitfalls`), and enforces the pre-merge security gate.
+  - `teamwork_task_update`: Enforces deterministic state transitions (`pending` → `worker_active` → `worker_done` → `verifier_active` → `verified_pass` | `verified_fail` | `blocked`), tracking rounds, worker branches, diff summaries, and verification results. Automatically marks tasks `blocked` if `maxRounds` is exceeded.
+  - `teamwork_security_audit`: Enforces mandatory pre-merge security gate (`verify/security-audit.json`). If Critical or High findings exist, blocks final merge (`BLOCKED_BY_SECURITY`).
+  - `teamwork_worktree`: Out-of-repo git worktree lifecycle management (`setup`, `diff`, `merge`, `resolve`, `cleanup`). On merge conflict, produces `synthesis/conflict-<taskId>.json` with 3-way diffs for `team/synthesizer`. Self-heals broken or stale worktrees automatically.
+- **Dynamic Pitfall Injection**:
+  - Known failure modes logged via `teamwork_pitfall` are dynamically injected into `readyForWorker` tasks and surfaced in `describeRun` context.
+- **CLI Run Management & Inspection**:
+  - `opencode-teamwork runs`: Table summary of all sessions, statuses, security audits, and spent budgets.
+  - `opencode-teamwork inspect <id>`: Detailed DAG inspection, task breakdowns, conflict artifacts, and pitfall registries.
+  - `opencode-teamwork prune`: Prunes out-of-repo git worktrees for completed sessions.
+- Added automated test suite for DAG engine, security gate, conflict handling, and CLI helpers (`npm run test:engine`).
+- Added automated test suite for session tree cost tracking (`npm run test:cost`).
+
+### Changed
+
+- Updated `sentinel.md`, `worker.md`, `synthesizer.md`, and `docs/ARTIFACTS.md` to reflect the mandatory pre-merge security gate, dynamic pitfall injection, conflict resolution mode, and new tool options.
+
 ## [0.5.1] - 2026-10-12
 
 ### Fixed

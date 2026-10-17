@@ -62,6 +62,18 @@ What you tested yourself. Compiler, type checker, dry-run. Mark anything
 you could NOT verify (those go to the verifier).
 ```
 
+## Git Merge Conflict Resolution Mode
+
+When dispatched by the Sentinel to resolve a merge conflict:
+- **Inputs**: `.opencode/teamwork/<session-id>/synthesis/conflict-<taskId>.json` containing `conflictingFiles`, `diffOurs`, and `diffTheirs`.
+- **What you do**:
+  1. Inspect both `diffOurs` (base branch state) and `diffTheirs` (worker's incoming changes).
+  2. Semantically combine both changes without discarding either task's functionality.
+  3. Write the resolved files directly to the sentinel worktree.
+  4. Verify syntax and run local checks.
+  5. Write summary to `.opencode/teamwork/<session-id>/synthesis/conflict-resolved-<taskId>.md`.
+  6. The Sentinel commits the resolution via `teamwork_worktree({ action: "resolve", taskId })`.
+
 ## Strategy
 
 The Teamwork paper's synthesis is a tournament, not an average. You don't

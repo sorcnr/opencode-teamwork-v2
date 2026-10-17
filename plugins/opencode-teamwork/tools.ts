@@ -15,19 +15,26 @@
 // No OpenCode imports: tool definitions are plain objects, so the loader never
 // has to resolve node_modules for this package.
 
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync, appendFileSync, renameSync } from "node:fs"
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync, appendFileSync, renameSync, rmSync } from "node:fs"
 import { basename, dirname, isAbsolute, join, relative } from "node:path"
+import { homedir } from "node:os"
+import { execFileSync } from "node:child_process"
 
 // ---------------------------------------------------------------------------
 // OpenCode native cost tracking
 //
-// The plugin context (`ctx`) is itself an OpenCode server client, so the
-// canonical cost signal is `ctx.session.get({ sessionID })`, whose Session.Info
-// carries `cost` (Money.USD) and `tokens` (TokenUsage.Info) computed by
-// OpenCode from real token usage. We snapshot the cumulative cost per session
-// and report deltas, so a run's spend is measured — never self-reported.
-// When the client is unavailable (tests, non-OpenCode host) we fall back to
-// manual addUsd.
+// Total consumption is computed exactly from OpenCode across the entire
+// session tree: the root Sentinel session + all spawned child/subagent
+// sessions (workers, verifiers, scouts, challengers, etc.).
+//
+// We discover OpenCode session trees via three redundant channels:
+//   1. OpenCode SQLite database (`session_v2` recursive query) via `node:sqlite`
+//   2. OpenCode SQLite database via `sqlite3` CLI
+//   3. OpenCode background service API (`GET /api/session?parentID=...`)
+//   4. Native client fallback (`ctx.session.get({ sessionID })`)
+//
+// We snapshot cumulative cost per session and report deltas, ensuring a run's
+// spend is measured honestly — never self-reported or lost if a worker halts.
 // ---------------------------------------------------------------------------
 
 interface TokenUsage {
@@ -41,12 +48,27 @@ interface SessionSnapshot {
   /** Last observed cumulative cost for this OpenCode session, in USD. */
   lastCost: number
   lastTokens: TokenUsage
+  agent?: string
   timestamp: string
 }
 
 interface SnapshotsFile {
   sessionId: string
+  rootSessionIds?: string[]
   bySession: Record<string, SessionSnapshot>
+}
+
+interface SessionUsageItem {
+  id: string
+  parentId?: string
+  agent?: string
+  cost: number
+  tokens: TokenUsage
+}
+
+interface TreeUsageResult {
+  sessions: SessionUsageItem[]
+  source: string
 }
 
 function normalizeTokens(t: any): TokenUsage {
@@ -62,6 +84,7 @@ function readSnapshots(file: string): SnapshotsFile | undefined {
   try {
     const parsed = JSON.parse(readFileSync(file, "utf8")) as SnapshotsFile
     if (!parsed || typeof parsed !== "object" || typeof parsed.bySession !== "object") return undefined
+    if (!Array.isArray(parsed.rootSessionIds)) parsed.rootSessionIds = []
     return parsed
   } catch {
     return undefined
@@ -77,10 +100,233 @@ function writeSnapshots(file: string, value: SnapshotsFile) {
   renameSync(tmp, file)
 }
 
+function getOpencodeDbPath(): string | undefined {
+  const candidates: string[] = []
+  if (process.env.XDG_DATA_HOME) {
+    candidates.push(join(process.env.XDG_DATA_HOME, "opencode", "opencode.db"))
+  }
+  const home = homedir()
+  candidates.push(join(home, ".local", "share", "opencode", "opencode.db"))
+  candidates.push(join(home, "Library", "Application Support", "opencode", "opencode.db"))
+  if (process.env.LOCALAPPDATA) {
+    candidates.push(join(process.env.LOCALAPPDATA, "opencode", "opencode.db"))
+  }
+  candidates.push(join(home, "AppData", "Local", "opencode", "opencode.db"))
+  for (const p of candidates) {
+    try {
+      if (existsSync(p)) return p
+    } catch {}
+  }
+  return undefined
+}
+
+function getOpencodeService(): { url: string; auth: string } | undefined {
+  const candidates: string[] = []
+  if (process.env.XDG_STATE_HOME) {
+    candidates.push(join(process.env.XDG_STATE_HOME, "opencode", "service.json"))
+  }
+  const home = homedir()
+  candidates.push(join(home, ".local", "state", "opencode", "service.json"))
+  candidates.push(join(home, "Library", "Application Support", "opencode", "service.json"))
+  if (process.env.LOCALAPPDATA) {
+    candidates.push(join(process.env.LOCALAPPDATA, "opencode", "service.json"))
+  }
+  for (const p of candidates) {
+    try {
+      if (existsSync(p)) {
+        const raw = JSON.parse(readFileSync(p, "utf8"))
+        if (raw?.url) {
+          const auth = "Basic " + Buffer.from(`opencode:${raw.password ?? ""}`).toString("base64")
+          return { url: raw.url, auth }
+        }
+      }
+    } catch {}
+  }
+  return undefined
+}
+
+async function fetchServiceTree(url: string, auth: string, rootIds: string[]): Promise<SessionUsageItem[] | undefined> {
+  const sessions: SessionUsageItem[] = []
+  const seen = new Set<string>()
+  const queue: string[] = [...rootIds]
+
+  for (const rootId of rootIds) {
+    if (seen.has(rootId)) continue
+    seen.add(rootId)
+    try {
+      const res = await fetch(`${url}/api/session/${encodeURIComponent(rootId)}`, {
+        headers: { Authorization: auth },
+        signal: AbortSignal.timeout(3000),
+      })
+      if (res.ok) {
+        const json: any = await res.json()
+        const s = json?.data
+        if (s && typeof s.cost === "number") {
+          sessions.push({
+            id: s.id,
+            parentId: s.parentID,
+            agent: s.agent,
+            cost: s.cost,
+            tokens: normalizeTokens(s.tokens),
+          })
+        }
+      }
+    } catch {}
+  }
+
+  while (queue.length > 0) {
+    const parentId = queue.shift()!
+    try {
+      const res = await fetch(`${url}/api/session?parentID=${encodeURIComponent(parentId)}`, {
+        headers: { Authorization: auth },
+        signal: AbortSignal.timeout(3000),
+      })
+      if (res.ok) {
+        const json: any = await res.json()
+        const children = Array.isArray(json?.data) ? json.data : []
+        for (const c of children) {
+          if (c?.id && !seen.has(c.id)) {
+            seen.add(c.id)
+            queue.push(c.id)
+            sessions.push({
+              id: c.id,
+              parentId: c.parentID,
+              agent: c.agent,
+              cost: Number(c.cost) || 0,
+              tokens: normalizeTokens(c.tokens),
+            })
+          }
+        }
+      }
+    } catch {}
+  }
+
+  return sessions.length ? sessions : undefined
+}
+
 /**
- * Read the real cumulative cost + tokens for an OpenCode session from the
- * plugin client. Returns undefined when the client or session is unavailable
- * (tests, non-OpenCode host), which switches the cost tool to manual mode.
+ * Read the real cumulative cost + tokens for an OpenCode session tree (root +
+ * all child/subagent sessions).
+ */
+async function readSessionTreeUsage(
+  ctx: any,
+  rootIds: string[],
+  fallbackSessionId?: string,
+): Promise<TreeUsageResult | undefined> {
+  const safeIds = Array.from(new Set([...rootIds, ...(fallbackSessionId ? [fallbackSessionId] : [])])).filter(
+    (id) => typeof id === "string" && /^[0-9A-Za-z_.-]+$/.test(id),
+  )
+  if (!safeIds.length) return undefined
+
+  // 1. Try local SQLite database (node:sqlite)
+  const dbPath = getOpencodeDbPath()
+  if (dbPath) {
+    try {
+      const { DatabaseSync } = await import("node:sqlite")
+      const db = new DatabaseSync(dbPath, { readOnly: true })
+      const placeholders = safeIds.map(() => "?").join(", ")
+      const stmt = db.prepare(`
+        WITH RECURSIVE tree AS (
+          SELECT id, parent_id, agent, cost, tokens_input, tokens_output, tokens_reasoning, tokens_cache_read, tokens_cache_write
+          FROM session_v2 WHERE id IN (${placeholders})
+          UNION ALL
+          SELECT s.id, s.parent_id, s.agent, s.cost, s.tokens_input, s.tokens_output, s.tokens_reasoning, s.tokens_cache_read, s.tokens_cache_write
+          FROM session_v2 s JOIN tree t ON s.parent_id = t.id
+        )
+        SELECT id, parent_id, agent, cost, tokens_input, tokens_output, tokens_reasoning, tokens_cache_read, tokens_cache_write FROM tree;
+      `)
+      const rows = stmt.all(...safeIds)
+      db.close()
+      if (rows && rows.length > 0) {
+        return {
+          sessions: rows.map((r: any) => ({
+            id: String(r.id),
+            parentId: r.parent_id ? String(r.parent_id) : undefined,
+            agent: r.agent ? String(r.agent) : undefined,
+            cost: Number(r.cost) || 0,
+            tokens: {
+              input: Number(r.tokens_input) || 0,
+              output: Number(r.tokens_output) || 0,
+              reasoning: Number(r.tokens_reasoning) || 0,
+              cache: { read: Number(r.tokens_cache_read) || 0, write: Number(r.tokens_cache_write) || 0 },
+            },
+          })),
+          source: "opencode database (node:sqlite)",
+        }
+      }
+    } catch {}
+
+    // 2. Try sqlite3 CLI fallback
+    try {
+      const inClause = safeIds.map((id) => `'${id}'`).join(", ")
+      const sql = `
+        WITH RECURSIVE tree AS (
+          SELECT id, parent_id, agent, cost, tokens_input, tokens_output, tokens_reasoning, tokens_cache_read, tokens_cache_write
+          FROM session_v2 WHERE id IN (${inClause})
+          UNION ALL
+          SELECT s.id, s.parent_id, s.agent, s.cost, s.tokens_input, s.tokens_output, s.tokens_reasoning, s.tokens_cache_read, s.tokens_cache_write
+          FROM session_v2 s JOIN tree t ON s.parent_id = t.id
+        )
+        SELECT id, coalesce(parent_id, ''), coalesce(agent, ''), cost, tokens_input, tokens_output, tokens_reasoning, tokens_cache_read, tokens_cache_write FROM tree;
+      `
+      const raw = execFileSync("sqlite3", [dbPath, "-separator", "\t", sql], { encoding: "utf8", timeout: 5000 })
+      const lines = raw.trim().split("\n").filter(Boolean)
+      if (lines.length > 0) {
+        return {
+          sessions: lines.map((line) => {
+            const [id, parentId, agent, cost, inp, out, reas, cr, cw] = line.split("\t")
+            return {
+              id,
+              parentId: parentId || undefined,
+              agent: agent || undefined,
+              cost: Number(cost) || 0,
+              tokens: {
+                input: Number(inp) || 0,
+                output: Number(out) || 0,
+                reasoning: Number(reas) || 0,
+                cache: { read: Number(cr) || 0, write: Number(cw) || 0 },
+              },
+            }
+          }),
+          source: "opencode database (sqlite3 CLI)",
+        }
+      }
+    } catch {}
+  }
+
+  // 3. Try OpenCode background service API
+  const svc = getOpencodeService()
+  if (svc) {
+    try {
+      const items = await fetchServiceTree(svc.url, svc.auth, safeIds)
+      if (items && items.length > 0) {
+        return {
+          sessions: items,
+          source: "opencode service API",
+        }
+      }
+    } catch {}
+  }
+
+  // 4. Fallback to client ctx.session.get
+  const fallbackSessions: SessionUsageItem[] = []
+  for (const id of safeIds) {
+    const u = await readSessionUsage(ctx, id)
+    if (u) fallbackSessions.push({ id, cost: u.cost, tokens: u.tokens })
+  }
+  if (fallbackSessions.length > 0) {
+    return {
+      sessions: fallbackSessions,
+      source: `opencode session ${safeIds[0]}`,
+    }
+  }
+
+  return undefined
+}
+
+/**
+ * Read cumulative cost + tokens for a single session from ctx.session.get.
+ * Used for baselines or as a single-session fallback.
  */
 async function readSessionUsage(
   ctx: any,
@@ -148,7 +394,7 @@ const RUN_ROOT = ".opencode/teamwork"
 
 // session ids are generated by us; anything else must match this allowlist.
 const SESSION_ID = /^[0-9A-Za-z][0-9A-Za-z._-]{0,63}$/
-const PHASES = new Set(["LOAD_SPEC", "WORKTREE_INIT", "DAG_BUILD", "DISPATCH", "MERGE", "PRESENT_PARTIAL", "DONE"])
+const PHASES = new Set(["LOAD_SPEC", "WORKTREE_INIT", "DAG_BUILD", "DISPATCH", "SECURITY_AUDIT", "MERGE", "PRESENT_PARTIAL", "DONE"])
 
 // Per-agent read-only policy, enforced in code. Keys are agent ids; values are
 // the actions that agent may NOT perform. Anything not listed keeps its
@@ -159,7 +405,7 @@ const READ_ONLY_ACTIONS: Record<string, Set<string>> = {
   "team/verifier": new Set(["edit", "webfetch", "subagent"]),
   "team/falsifier": new Set(["edit", "shell", "subagent"]),
   "team/scout": new Set(["edit", "subagent"]),
-  "team/security-auditor": new Set(["edit", "subagent"]),
+  "team/security-auditor": new Set(["edit", "webfetch", "subagent"]),
 }
 
 const pad = (n: number) => String(n).padStart(2, "0")
@@ -180,6 +426,24 @@ function clean(value: unknown, max = 64): string {
 
 function runsDir(root: string) {
   return join(root, RUN_ROOT)
+}
+
+function readPitfalls(run: string, taskId?: string): string[] {
+  try {
+    const file = join(run, "pitfalls.md")
+    if (!existsSync(file)) return []
+    const content = readFileSync(file, "utf8")
+    const lines = content
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l.startsWith("-"))
+      .map((l) => clean(l.replace(/^-\s*/, ""), 200))
+    if (!taskId) return lines
+    const targetTag = `seen in ${clean(taskId, 64)}`
+    return lines.filter((l) => !l.includes("seen in ") || l.includes(targetTag))
+  } catch {
+    return []
+  }
 }
 
 /**
@@ -331,14 +595,12 @@ export function describeRun(root: string): string | undefined {
   const state = readJson<any>(join(run, "state.json"), undefined)
   if (!state) return undefined
   const tasks = Object.values(state.tasks || {}) as any[]
-  const pass = tasks.filter((t) => t?.status === "pass").length
-  const fail = tasks.filter((t) => t?.status === "fail").length
-  let pitfalls = 0
-  try {
-    pitfalls = readFileSync(join(run, "pitfalls.md"), "utf8")
-      .split("\n")
-      .filter((l) => l.trim().startsWith("-")).length
-  } catch {}
+  const pass = tasks.filter((t) => t?.status === "pass" || t?.status === "verified_pass").length
+  const fail = tasks.filter((t) => t?.status === "fail" || t?.status === "verified_fail" || t?.status === "blocked").length
+  const allPitfalls = readPitfalls(run)
+  const pitfalls = allPitfalls.length
+  const recentPitfalls = allPitfalls.slice(-2).map((p) => clean(p, 70))
+  const pitfallSuffix = recentPitfalls.length ? ` (recent: ${recentPitfalls.join("; ")})` : ""
   const id = basename(run)
   if (!SESSION_ID.test(id)) return undefined // never inject a non-conforming dir name
   const phase = PHASES.has(state.phase) ? state.phase : "UNKNOWN"
@@ -352,7 +614,7 @@ export function describeRun(root: string): string | undefined {
   }
   return [
     `[teamwork] active run ${id} — phase ${phase}.`,
-    `Tasks: ${pass}/${tasks.length} pass, ${fail} fail. Open pitfalls: ${pitfalls}.`,
+    `Tasks: ${pass}/${tasks.length} pass, ${fail} fail. Open pitfalls: ${pitfalls}${pitfallSuffix}.`,
     costLine,
     `State: ${join(runsDir(root), id, "state.json")} (read it before dispatching).`,
   ].join("\n")
@@ -424,36 +686,49 @@ export async function registerTeamworkTools(ctx: any, root: string) {
         // Use ?? (nullish coalescing) so budgetUsd: 0 is respected as "no budget"
         const budget = input.budgetUsd ?? 20
         const costsFile = join(run, "costs.json")
-        const callSession = context?.sessionID
+        const callSession = typeof context?.sessionID === "string" ? context.sessionID : undefined
         // Same lock as the cost tool so a re-plan cannot race a concurrent cost call.
         await withFileLock(costsFile, async () => {
           const existing = readJson<any>(costsFile, undefined)
           if (!existing) {
             writeJson(costsFile, {
               sessionId,
+              rootSessionIds: callSession ? [callSession] : [],
               budgetUsd: budget,
               budgetSource: input.budgetSource ? clean(input.budgetSource, 32) : "default",
               spentUsd: 0,
               byTask: {},
               updatedAt: new Date().toISOString(),
             })
-          } else if (
-            existing.budgetUsd !== budget ||
-            (input.budgetSource && existing.budgetSource !== clean(input.budgetSource, 32))
-          ) {
-            // Update the budget/source but PRESERVE accumulated spend and
-            // per-task buckets (a re-plan must not wipe the run's measured cost).
-            existing.budgetUsd = budget
-            if (input.budgetSource) existing.budgetSource = clean(input.budgetSource, 32)
+          } else {
+            if (callSession) {
+              const currentRoots = Array.isArray(existing.rootSessionIds) ? existing.rootSessionIds : []
+              if (!currentRoots.includes(callSession)) {
+                existing.rootSessionIds = [...currentRoots, callSession]
+              }
+            }
+            if (
+              existing.budgetUsd !== budget ||
+              (input.budgetSource && existing.budgetSource !== clean(input.budgetSource, 32))
+            ) {
+              // Update the budget/source but PRESERVE accumulated spend and
+              // per-task buckets (a re-plan must not wipe the run's measured cost).
+              existing.budgetUsd = budget
+              if (input.budgetSource) existing.budgetSource = clean(input.budgetSource, 32)
+            }
             existing.updatedAt = new Date().toISOString()
             writeJson(costsFile, existing)
           }
           // Establish the native cost baseline for the calling session, preserving
           // any baselines already recorded for other sessions (merge, don't clobber).
           const now = new Date().toISOString()
-          const usage = await readSessionUsage(ctx, callSession)
-          const snaps = readSnapshots(join(run, "snapshots.json")) ?? { sessionId, bySession: {} }
+          const snaps = readSnapshots(join(run, "snapshots.json")) ?? { sessionId, rootSessionIds: [], bySession: {} }
           snaps.sessionId = sessionId
+          if (!snaps.rootSessionIds) snaps.rootSessionIds = []
+          if (callSession && !snaps.rootSessionIds.includes(callSession)) {
+            snaps.rootSessionIds.push(callSession)
+          }
+          const usage = await readSessionUsage(ctx, callSession)
           if (callSession && usage && !snaps.bySession[callSession]) {
             snaps.bySession[callSession] = { lastCost: usage.cost, lastTokens: usage.tokens, timestamp: now }
           }
@@ -508,7 +783,7 @@ export async function registerTeamworkTools(ctx: any, root: string) {
     editor.add({
       name: "cost",
       description:
-        "Read the run budget and report real spend. Uses OpenCode's native per-session cost (ctx.session.get) and reports the delta since the last check; falls back to manual addUsd when the client is unavailable. Warns at 80%.",
+        "Read the run budget and report real spend across the full session tree (Sentinel + all workers/verifiers). Uses OpenCode's native cost and token tracking; falls back to manual addUsd when client/db is unavailable. Warns at 80%.",
       input: { type: "object", properties: { sessionId: { type: "string" }, addUsd: { type: "number" }, taskId: { type: "string" } }, additionalProperties: false },
       execute: async (input: any, context: any) => {
         const resolved = resolveRun(root, input?.sessionId)
@@ -528,38 +803,114 @@ export async function registerTeamworkTools(ctx: any, root: string) {
           }
           costs.byTask = costs.byTask && typeof costs.byTask === "object" ? costs.byTask : {}
           const budget = costs.budgetUsd ?? 20
-          const usage = await readSessionUsage(ctx, callSession)
 
-          // Attribute every dollar to a bucket so sum(byTask) === spentUsd holds
-          // by construction — no drift between the per-task view and the total.
-          const bucket = input.taskId ? clean(input.taskId, 64) : "_unattributed"
-          const addToBucket = (amount: number) => {
-            costs.byTask[bucket] = Math.round(((costs.byTask[bucket] || 0) + amount) * 1e4) / 1e4
+          const snaps = readSnapshots(snapshotsFile) ?? { sessionId: basename(run), rootSessionIds: [], bySession: {} }
+          snaps.sessionId = basename(run)
+          if (!snaps.rootSessionIds) snaps.rootSessionIds = []
+          if (callSession && !snaps.rootSessionIds.includes(callSession)) {
+            snaps.rootSessionIds.push(callSession)
+          }
+          if (Array.isArray(costs.rootSessionIds)) {
+            for (const r of costs.rootSessionIds) {
+              if (typeof r === "string" && !snaps.rootSessionIds.includes(r)) {
+                snaps.rootSessionIds.push(r)
+              }
+            }
+          }
+
+          const addToBucket = (bucketName: string, amount: number) => {
+            if (amount <= 0) return
+            costs.byTask[bucketName] = Math.round(((costs.byTask[bucketName] || 0) + amount) * 1e4) / 1e4
+          }
+
+          const treeResult = await readSessionTreeUsage(ctx, snaps.rootSessionIds, callSession)
+          let source: string
+
+          if (treeResult && treeResult.sessions.length > 0) {
+            const now = new Date().toISOString()
+            const totalTokens: TokenUsage = { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }
+
+            for (const s of treeResult.sessions) {
+              const prev = snaps.bySession[s.id]
+              const delta = prev
+                ? Math.round((s.cost - prev.lastCost) * 1e4) / 1e4
+                : Math.round(s.cost * 1e4) / 1e4
+
+              snaps.bySession[s.id] = {
+                lastCost: s.cost,
+                lastTokens: s.tokens,
+                agent: s.agent,
+                timestamp: now,
+              }
+
+              if (delta > 0) {
+                let bucket: string
+                if (s.id === callSession && input.taskId) {
+                  bucket = clean(input.taskId, 64)
+                } else if (snaps.rootSessionIds.includes(s.id)) {
+                  bucket = input.taskId ? clean(input.taskId, 64) : "_sentinel"
+                } else if (s.agent) {
+                  bucket = clean(s.agent, 64)
+                } else {
+                  bucket = input.taskId ? clean(input.taskId, 64) : "_unattributed"
+                }
+                addToBucket(bucket, delta)
+              }
+
+              totalTokens.input += s.tokens.input
+              totalTokens.output += s.tokens.output
+              totalTokens.reasoning += s.tokens.reasoning
+              totalTokens.cache.read += s.tokens.cache.read
+              totalTokens.cache.write += s.tokens.cache.write
+            }
+
+            costs.spentUsd =
+              Math.round(Object.values(costs.byTask).reduce((a: number, b: any) => a + (Number(b) || 0), 0) * 1e4) / 1e4
+            costs.tokens = totalTokens
+            costs.rootSessionIds = snaps.rootSessionIds
+            costs.updatedAt = now
+            writeJson(file, costs)
+            writeSnapshots(snapshotsFile, snaps)
+            source = `opencode session tree (${treeResult.sessions.length} sessions, via ${treeResult.source})`
+          } else if (callSession) {
+            const usage = await readSessionUsage(ctx, callSession)
+            if (usage) {
+              const now = new Date().toISOString()
+              const prev = snaps.bySession[callSession]
+              const delta = prev
+                ? Math.round((usage.cost - prev.lastCost) * 1e4) / 1e4
+                : Math.round(usage.cost * 1e4) / 1e4
+              snaps.bySession[callSession] = { lastCost: usage.cost, lastTokens: usage.tokens, timestamp: now }
+              if (delta > 0) {
+                const bucket = input.taskId ? clean(input.taskId, 64) : "_unattributed"
+                addToBucket(bucket, delta)
+              }
+              costs.spentUsd =
+                Math.round(Object.values(costs.byTask).reduce((a: number, b: any) => a + (Number(b) || 0), 0) * 1e4) / 1e4
+              costs.updatedAt = now
+              writeJson(file, costs)
+              writeSnapshots(snapshotsFile, snaps)
+              source = `opencode session ${callSession}`
+            } else if (typeof input?.addUsd === "number" && Number.isFinite(input.addUsd)) {
+              if (input.addUsd < 0) return { content: "Error: addUsd must be non-negative" }
+              const bucket = input.taskId ? clean(input.taskId, 64) : "_unattributed"
+              addToBucket(bucket, input.addUsd)
+              costs.spentUsd =
+                Math.round(Object.values(costs.byTask).reduce((a: number, b: any) => a + (Number(b) || 0), 0) * 1e4) / 1e4
+              costs.updatedAt = new Date().toISOString()
+              writeJson(file, costs)
+              source = "manual (client unavailable)"
+            } else {
+              source = "manual (client unavailable)"
+            }
+          } else if (typeof input?.addUsd === "number" && Number.isFinite(input.addUsd)) {
+            if (input.addUsd < 0) return { content: "Error: addUsd must be non-negative" }
+            const bucket = input.taskId ? clean(input.taskId, 64) : "_unattributed"
+            addToBucket(bucket, input.addUsd)
             costs.spentUsd =
               Math.round(Object.values(costs.byTask).reduce((a: number, b: any) => a + (Number(b) || 0), 0) * 1e4) / 1e4
             costs.updatedAt = new Date().toISOString()
             writeJson(file, costs)
-          }
-
-          let source: string
-          if (usage && callSession) {
-            // Native path: real, OpenCode-computed cost. Report the delta since we
-            // last observed this session so cumulative cost is never double-counted.
-            const snaps = readSnapshots(snapshotsFile) ?? { sessionId: basename(run), bySession: {} }
-            const prev = snaps.bySession[callSession]
-            // No prior baseline (e.g. a worker session created mid-run): attribute
-            // the session's full cost, since it started at $0. When a baseline
-            // exists (the sentinel, baselined in plan) attribute only the delta.
-            const delta = prev
-              ? Math.round((usage.cost - prev.lastCost) * 1e4) / 1e4
-              : Math.round(usage.cost * 1e4) / 1e4
-            snaps.bySession[callSession] = { lastCost: usage.cost, lastTokens: usage.tokens, timestamp: new Date().toISOString() }
-            writeSnapshots(snapshotsFile, snaps)
-            if (delta > 0) addToBucket(delta)
-            source = `opencode session ${callSession}`
-          } else if (typeof input?.addUsd === "number" && Number.isFinite(input.addUsd)) {
-            if (input.addUsd < 0) return { content: "Error: addUsd must be non-negative" }
-            addToBucket(input.addUsd)
             source = "manual (client unavailable)"
           } else {
             source = "manual (client unavailable)"
@@ -625,6 +976,647 @@ export async function registerTeamworkTools(ctx: any, root: string) {
         return { content: `Logged pitfall: ${line.trim()}` }
       },
     })
+
+    editor.add({
+      name: "next",
+      description:
+        "Determine the next actionable tasks in the DAG based on dependencies and current lifecycle states. Returns tasks ready for worker dispatch, tasks ready for verifier dispatch, in-progress tasks, or signals completion/deadlock.",
+      input: {
+        type: "object",
+        properties: {
+          sessionId: { type: "string", description: "Teamwork session id (defaults to active run)." },
+        },
+        additionalProperties: false,
+      },
+      execute: async (input: any) => {
+        const resolved = resolveRun(root, input?.sessionId)
+        if (resolved.error) return { content: resolved.error }
+        const run = resolved.run as string
+
+        const plan = readJson<any>(join(run, "plan.dag.json"), undefined)
+        const state = readJson<any>(join(run, "state.json"), undefined)
+        if (!plan || !Array.isArray(plan.tasks)) {
+          return { content: `No valid plan.dag.json found for run ${basename(run)}.` }
+        }
+        if (!state || typeof state.tasks !== "object") {
+          return { content: `No valid state.json found for run ${basename(run)}.` }
+        }
+
+        const taskDefs = new Map<string, any>(plan.tasks.map((t: any) => [t.id, t]))
+        const taskStates = state.tasks as Record<string, any>
+
+        const isPassed = (id: string) => {
+          const s = taskStates[id]?.status
+          return s === "verified_pass" || s === "pass"
+        }
+
+        const isBlocked = (id: string) => {
+          const s = taskStates[id]?.status
+          const r = Number(taskStates[id]?.round) || 0
+          const maxR = Number(taskDefs.get(id)?.maxRounds) || 4
+          return s === "blocked" || (s === "verified_fail" && r >= maxR) || (s === "fail" && r >= maxR)
+        }
+
+        const readyForWorker: any[] = []
+        const readyForVerifier: any[] = []
+        const inProgress: any[] = []
+        const blockedTasks: any[] = []
+        const passedTasks: any[] = []
+
+        for (const [id, def] of taskDefs.entries()) {
+          const st = taskStates[id] || { status: "pending", round: 0 }
+          const status = st.status || "pending"
+          const round = Number(st.round) || 0
+          const maxRounds = Number(def.maxRounds) || 4
+          const deps = Array.isArray(def.dependsOn) ? def.dependsOn : []
+
+          if (isPassed(id)) {
+            passedTasks.push({ id, status, round })
+            continue
+          }
+
+          if (isBlocked(id)) {
+            blockedTasks.push({ id, status, round, reason: "Max rounds exceeded or explicitly blocked" })
+            continue
+          }
+
+          const blockedDep = deps.find(isBlocked)
+          if (blockedDep) {
+            blockedTasks.push({ id, status: "blocked", reason: `Dependency ${blockedDep} failed/blocked` })
+            continue
+          }
+
+          const allDepsPassed = deps.every(isPassed)
+
+          if (status === "worker_done") {
+            readyForVerifier.push({
+              id,
+              agent: "team/verifier",
+              branch: st.branch || `teamwork/${basename(run)}-${id}`,
+              round,
+              summary: st.summary,
+            })
+          } else if (status === "worker_active" || status === "verifier_active" || status === "running") {
+            inProgress.push({
+              id,
+              status,
+              round,
+              branch: st.branch,
+            })
+          } else if (allDepsPassed && (status === "pending" || ((status === "verified_fail" || status === "fail") && round < maxRounds))) {
+            const pitfalls = readPitfalls(run, id)
+            readyForWorker.push({
+              id,
+              agent: def.agent || "team/worker",
+              round: (status === "verified_fail" || status === "fail") ? round + 1 : (round || 1),
+              maxRounds,
+              requirements: def.requirements || [],
+              dependsOn: deps,
+              branch: st.branch || `teamwork/${basename(run)}-${id}`,
+              feedback: st.feedback,
+              avoidPitfalls: pitfalls,
+            })
+          }
+        }
+
+        if (passedTasks.length === taskDefs.size) {
+          const auditFile = join(run, "verify", "security-audit.json")
+          const audit = existsSync(auditFile) ? readJson<any>(auditFile, undefined) : undefined
+
+          if (!audit || audit.status !== "PASS") {
+            const auditFailed = audit && audit.status === "FAIL"
+            if (state.phase !== "SECURITY_AUDIT" && !auditFailed) {
+              state.phase = "SECURITY_AUDIT"
+              writeJson(join(run, "state.json"), state)
+            }
+
+            if (auditFailed) {
+              const crit = Number(audit?.severityCounts?.critical) || 0
+              const high = Number(audit?.severityCounts?.high) || 0
+              return {
+                content: `BLOCKED_BY_SECURITY: All tasks passed functional verification, but security audit FAILED with ${crit} Critical and ${high} High findings.\nFix findings before final merge.\nReport: ${auditFile}`,
+                status: "BLOCKED_BY_SECURITY",
+                auditReport: auditFile,
+                passedCount: passedTasks.length,
+              }
+            }
+
+            return {
+              content: `READY_FOR_SECURITY_AUDIT: All ${taskDefs.size} tasks passed functional verification and are merged into base.\nMandatory Security Gate: Dispatch team/security-auditor on sentinel worktree before final merge.\nRun teamwork_security_audit tool when audit completes.`,
+              status: "READY_FOR_SECURITY_AUDIT",
+              agent: "team/security-auditor",
+              passedCount: passedTasks.length,
+            }
+          }
+
+          if (state.phase !== "MERGE" && state.phase !== "DONE") {
+            state.phase = "MERGE"
+            writeJson(join(run, "state.json"), state)
+          }
+
+          return {
+            content: `ALL_TASKS_PASSED: All ${taskDefs.size} tasks have passed verification and security audit PASSED. Ready to merge Sentinel base worktree to user branch and present final artifact.`,
+            status: "ALL_PASSED",
+            passedCount: passedTasks.length,
+            securityAuditPassed: true,
+          }
+        }
+
+        if (!readyForWorker.length && !readyForVerifier.length && !inProgress.length) {
+          return {
+            content: `DEADLOCK_OR_BLOCKED: No tasks can proceed.\nBlocked tasks (${blockedTasks.length}):\n` +
+              blockedTasks.map((t) => `  - ${t.id}: ${t.reason}`).join("\n"),
+            status: "DEADLOCK",
+            blocked: blockedTasks,
+          }
+        }
+
+        const lines = [`DAG Status for run ${basename(run)}:`]
+        if (readyForWorker.length) {
+          lines.push(`\n▶ READY FOR WORKER (${readyForWorker.length}): Dispatch worker subagent for each in parallel:`)
+          for (const t of readyForWorker) {
+            lines.push(`  - Task: ${t.id} (Agent: ${t.agent}, Round: ${t.round}/${t.maxRounds})`)
+            lines.push(`    Branch: ${t.branch}`)
+            if (t.feedback) lines.push(`    Verifier Feedback: ${clean(t.feedback, 120)}`)
+            if (t.avoidPitfalls?.length) {
+              lines.push(`    ⚠ Avoid Known Pitfalls: ${t.avoidPitfalls.slice(0, 3).map((p: string) => clean(p, 80)).join("; ")}`)
+            }
+          }
+        }
+        if (readyForVerifier.length) {
+          lines.push(`\n▶ READY FOR VERIFIER (${readyForVerifier.length}): Dispatch verifier subagent against worker branch:`)
+          for (const t of readyForVerifier) {
+            lines.push(`  - Task: ${t.id} (Verifier: ${t.agent}, Branch: ${t.branch})`)
+          }
+        }
+        if (inProgress.length) {
+          lines.push(`\n⏳ IN PROGRESS (${inProgress.length}):`)
+          for (const t of inProgress) {
+            lines.push(`  - ${t.id}: ${t.status} (round ${t.round})`)
+          }
+        }
+        lines.push(`\nProgress: ${passedTasks.length}/${taskDefs.size} passed, ${blockedTasks.length} blocked.`)
+
+        return {
+          content: lines.join("\n"),
+          readyForWorker,
+          readyForVerifier,
+          inProgress,
+          passedCount: passedTasks.length,
+          totalTasks: taskDefs.size,
+        }
+      },
+    })
+
+    editor.add({
+      name: "task_update",
+      description:
+        "Update a task's lifecycle status, round, branch, and verification report in state.json. Lifecycle: pending -> worker_active -> worker_done -> verifier_active -> verified_pass | verified_fail | blocked.",
+      input: {
+        type: "object",
+        properties: {
+          sessionId: { type: "string" },
+          taskId: { type: "string", description: "The task ID defined in plan.dag.json." },
+          status: {
+            type: "string",
+            description: "pending | worker_active | worker_done | verifier_active | verified_pass | verified_fail | blocked",
+          },
+          round: { type: "number" },
+          branch: { type: "string" },
+          worktree: { type: "string" },
+          summary: { type: "string", description: "Short summary of what worker implemented." },
+          feedback: { type: "string", description: "Feedback from verifier for the next worker round." },
+          verification: {
+            type: "object",
+            properties: {
+              status: { type: "string", description: "PASS | FAIL" },
+              passedChecks: { type: "number" },
+              totalChecks: { type: "number" },
+              fatalFindings: { type: "array", items: { type: "string" } },
+            },
+          },
+        },
+        required: ["taskId", "status"],
+        additionalProperties: false,
+      },
+      execute: async (input: any) => {
+        const resolved = resolveRun(root, input?.sessionId)
+        if (resolved.error) return { content: resolved.error }
+        const run = resolved.run as string
+        const stateFile = join(run, "state.json")
+        const planFile = join(run, "plan.dag.json")
+
+        const taskId = clean(input.taskId, 64)
+        if (!taskId) return { content: "Error: taskId is required" }
+
+        return await withFileLock(stateFile, async () => {
+          const state = readJson<any>(stateFile, undefined)
+          if (!state || typeof state.tasks !== "object") {
+            return { content: `Error: No state.json found for run ${basename(run)}.` }
+          }
+          const plan = readJson<any>(planFile, undefined)
+          const def = Array.isArray(plan?.tasks) ? plan.tasks.find((t: any) => t.id === taskId) : undefined
+          if (!def && !state.tasks[taskId]) {
+            return { content: `Error: Task "${taskId}" not found in plan or state.` }
+          }
+
+          let status = clean(input.status, 32)
+          if (status === "pass") status = "verified_pass"
+          else if (status === "fail") status = "verified_fail"
+          else if (status === "running") status = "worker_active"
+
+          const VALID_STATUSES = new Set([
+            "pending",
+            "worker_active",
+            "worker_done",
+            "verifier_active",
+            "verified_pass",
+            "verified_fail",
+            "blocked",
+          ])
+          if (!VALID_STATUSES.has(status)) {
+            return { content: `Error: Invalid status "${status}". Allowed: ${Array.from(VALID_STATUSES).join(", ")}` }
+          }
+
+          const current = state.tasks[taskId] || { status: "pending", round: 0 }
+          const maxRounds = Number(def?.maxRounds) || 4
+          let round = Number.isFinite(input.round) ? Number(input.round) : (Number(current.round) || 0)
+
+          if (status === "worker_active" && !Number.isFinite(input.round)) {
+            round = Math.max(1, (Number(current.round) || 0) + (current.status === "verified_fail" ? 1 : 0))
+          }
+
+          if ((status === "verified_fail" || status === "fail") && round >= maxRounds) {
+            status = "blocked"
+          }
+
+          state.tasks[taskId] = {
+            ...current,
+            status,
+            round,
+            ...(input.branch ? { branch: clean(input.branch, 120) } : {}),
+            ...(input.worktree ? { worktree: clean(input.worktree, 200) } : {}),
+            ...(input.summary ? { summary: clean(input.summary, 300) } : {}),
+            ...(input.feedback ? { feedback: clean(input.feedback, 500) } : {}),
+            ...(input.verification ? { verification: input.verification } : {}),
+            updatedAt: new Date().toISOString(),
+          }
+
+          const allTasks = Object.values(state.tasks) as any[]
+          const allPassed = allTasks.every((t) => t.status === "verified_pass")
+          const anyActive = allTasks.some((t) => t.status === "worker_active" || t.status === "verifier_active")
+          if (allPassed) {
+            const auditFile = join(run, "verify", "security-audit.json")
+            const audit = existsSync(auditFile) ? readJson<any>(auditFile, undefined) : undefined
+            state.phase = audit?.status === "PASS" ? "MERGE" : "SECURITY_AUDIT"
+          } else if (!anyActive && allTasks.some((t) => t.status === "blocked")) {
+            state.phase = "PRESENT_PARTIAL"
+          }
+
+          state.updatedAt = new Date().toISOString()
+          writeJson(stateFile, state)
+
+          return {
+            content: `Task ${taskId} updated: status=${status}, round=${round}${input.branch ? `, branch=${input.branch}` : ""}${status === "blocked" ? " (BLOCKED: max rounds reached)" : ""}`,
+            taskId,
+            status,
+            round,
+          }
+        })
+      },
+    })
+
+    editor.add({
+      name: "security_audit",
+      description:
+        "Record the findings of team/security-auditor and enforce the pre-merge security gate. Writes verify/security-audit.json. If Critical or High findings exist, marks status as FAIL and blocks final merge.",
+      input: {
+        type: "object",
+        properties: {
+          sessionId: { type: "string" },
+          status: { type: "string", description: "PASS | FAIL" },
+          findings: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                id: { type: "string" },
+                severity: { type: "string", description: "Critical | High | Medium | Low" },
+                location: { type: "string" },
+                description: { type: "string" },
+              },
+              required: ["severity", "description"],
+            },
+          },
+          summary: { type: "string", description: "Summary of the security audit." },
+        },
+        required: ["status"],
+        additionalProperties: false,
+      },
+      execute: async (input: any) => {
+        const resolved = resolveRun(root, input?.sessionId)
+        if (resolved.error) return { content: resolved.error }
+        const run = resolved.run as string
+        const verifyDir = join(run, "verify")
+        mkdirSync(verifyDir, { recursive: true })
+        const auditFile = join(verifyDir, "security-audit.json")
+
+        const findings = Array.isArray(input.findings) ? input.findings : []
+        const counts = {
+          critical: findings.filter((f: any) => String(f.severity).toLowerCase() === "critical").length,
+          high: findings.filter((f: any) => String(f.severity).toLowerCase() === "high").length,
+          medium: findings.filter((f: any) => String(f.severity).toLowerCase() === "medium").length,
+          low: findings.filter((f: any) => String(f.severity).toLowerCase() === "low").length,
+        }
+
+        let status = clean(input.status, 16).toUpperCase()
+        if (counts.critical > 0 || counts.high > 0) {
+          status = "FAIL"
+        }
+
+        const report = {
+          sessionId: basename(run),
+          status,
+          timestamp: new Date().toISOString(),
+          severityCounts: counts,
+          summary: input.summary ? clean(input.summary, 500) : "",
+          findings: findings.map((f: any) => ({
+            id: clean(f.id || "", 32),
+            severity: clean(f.severity, 16),
+            location: clean(f.location || "", 120),
+            description: clean(f.description, 300),
+          })),
+        }
+        writeJson(auditFile, report)
+
+        const stateFile = join(run, "state.json")
+        const state = readJson<any>(stateFile, undefined)
+        if (state) {
+          if (status === "PASS") {
+            state.phase = "MERGE"
+          } else {
+            // Append critical/high findings to pitfalls so they become known
+            for (const f of findings) {
+              if (["critical", "high"].includes(String(f.severity).toLowerCase())) {
+                const line = `- [security] ${clean(f.severity, 16).toUpperCase()}: ${clean(f.description, 160)}${f.location ? ` at ${clean(f.location, 64)}` : ""}\n`
+                appendFileSync(join(run, "pitfalls.md"), line)
+              }
+            }
+          }
+          state.updatedAt = new Date().toISOString()
+          writeJson(stateFile, state)
+        }
+
+        if (status === "FAIL") {
+          return {
+            content: `SECURITY AUDIT FAILED: ${counts.critical} Critical, ${counts.high} High, ${counts.medium} Medium findings. Final merge is BLOCKED until remediated.\nReport saved to: ${auditFile}`,
+            status: "FAIL",
+            reportPath: auditFile,
+          }
+        }
+
+        return {
+          content: `SECURITY AUDIT PASSED: ${findings.length} findings (${counts.medium} Medium, ${counts.low} Low, 0 High/Critical). Final merge is APPROVED.\nReport saved to: ${auditFile}`,
+          status: "PASS",
+          reportPath: auditFile,
+        }
+      },
+    })
+
+    editor.add({
+      name: "worktree",
+      description:
+        "Deterministic git worktree manager for Teamwork runs: setup, diff, merge, resolve, and cleanup. Prevents in-repo nesting and isolates worker branches.",
+      input: {
+        type: "object",
+        properties: {
+          sessionId: { type: "string" },
+          action: {
+            type: "string",
+            description: "setup | diff | merge | resolve | cleanup",
+          },
+          role: {
+            type: "string",
+            description: "Role for setup action: sentinel | worker | verifier",
+          },
+          taskId: {
+            type: "string",
+            description: "Task ID (required for worker/verifier setup, diff, merge, and resolve)",
+          },
+          commitMessage: {
+            type: "string",
+            description: "Commit message for resolve action",
+          },
+        },
+        required: ["action"],
+        additionalProperties: false,
+      },
+      execute: async (input: any) => {
+        const resolved = resolveRun(root, input?.sessionId)
+        if (resolved.error) return { content: resolved.error }
+        const run = resolved.run as string
+        const runId = basename(run)
+
+        const action = clean(input.action, 16)
+        const taskId = input.taskId ? clean(input.taskId, 64) : undefined
+
+        const worktreesBase = process.env.TEAMWORK_WORKTREES_DIR
+          ? process.env.TEAMWORK_WORKTREES_DIR
+          : join(root, "..", ".teamwork-worktrees")
+        const runWorktreesDir = join(worktreesBase, runId)
+        const baseBranch = `teamwork/base-${runId}`
+
+        const execGit = (args: string[], cwd = root) => {
+          try {
+            return {
+              stdout: execFileSync("git", args, { cwd, encoding: "utf8", timeout: 15000, stdio: ["pipe", "pipe", "pipe"] }).trim(),
+              code: 0,
+            }
+          } catch (e: any) {
+            return {
+              stdout: String(e.stdout ?? "").trim(),
+              stderr: String(e.stderr ?? e.message ?? "").trim(),
+              code: typeof e.status === "number" ? e.status : 1,
+            }
+          }
+        }
+
+        const isGit = execGit(["rev-parse", "--is-inside-work-tree"])
+        if (isGit.code !== 0) {
+          return { content: "Skipped worktree operation: current directory is not a git repository." }
+        }
+
+        if (action === "setup") {
+          const role = clean(input.role || "worker", 16)
+          let targetDir: string
+          let branch: string
+
+          if (role === "sentinel") {
+            targetDir = join(runWorktreesDir, "sentinel")
+            branch = baseBranch
+            const branchExists = execGit(["rev-parse", "--verify", branch]).code === 0
+            mkdirSync(dirname(targetDir), { recursive: true })
+            if (existsSync(targetDir)) {
+              const check = execGit(["rev-parse", "--is-inside-work-tree"], targetDir)
+              if (check.code !== 0) {
+                try { rmSync(targetDir, { recursive: true, force: true }) } catch {}
+                execGit(["worktree", "prune"])
+              }
+            }
+            if (!existsSync(targetDir)) {
+              const res = branchExists
+                ? execGit(["worktree", "add", targetDir, branch])
+                : execGit(["worktree", "add", "-b", branch, targetDir])
+              if (res.code !== 0) {
+                return { content: `Error creating sentinel worktree: ${res.stderr || res.stdout}` }
+              }
+            }
+            return {
+              content: `Sentinel worktree ready at: ${targetDir}\nBranch: ${branch}`,
+              worktreePath: targetDir,
+              branch,
+              baseBranch,
+            }
+          } else {
+            if (!taskId) return { content: "Error: taskId is required for worker/verifier setup." }
+            targetDir = join(runWorktreesDir, role === "verifier" ? `verifier-${taskId}` : taskId)
+            branch = `teamwork/${runId}-${taskId}`
+
+            const hasBase = execGit(["rev-parse", "--verify", baseBranch]).code === 0
+            const startPoint = hasBase ? baseBranch : "HEAD"
+
+            mkdirSync(dirname(targetDir), { recursive: true })
+            if (existsSync(targetDir)) {
+              const check = execGit(["rev-parse", "--is-inside-work-tree"], targetDir)
+              if (check.code !== 0) {
+                try { rmSync(targetDir, { recursive: true, force: true }) } catch {}
+                execGit(["worktree", "prune"])
+              }
+            }
+            if (!existsSync(targetDir)) {
+              const branchExists = execGit(["rev-parse", "--verify", branch]).code === 0
+              const res = branchExists
+                ? execGit(["worktree", "add", targetDir, branch])
+                : execGit(["worktree", "add", "-b", branch, targetDir, startPoint])
+              if (res.code !== 0) {
+                return { content: `Error creating ${role} worktree: ${res.stderr || res.stdout}` }
+              }
+            }
+            return {
+              content: `${role} worktree ready at: ${targetDir}\nBranch: ${branch}\nBase: ${startPoint}`,
+              worktreePath: targetDir,
+              branch,
+              baseBranch: startPoint,
+            }
+          }
+        }
+
+        if (action === "diff") {
+          if (!taskId) return { content: "Error: taskId is required for diff." }
+          const branch = `teamwork/${runId}-${taskId}`
+          const hasBranch = execGit(["rev-parse", "--verify", branch]).code === 0
+          if (!hasBranch) {
+            return { content: `Error: branch "${branch}" not found.` }
+          }
+          const hasBase = execGit(["rev-parse", "--verify", baseBranch]).code === 0
+          const baseRef = hasBase ? baseBranch : "HEAD"
+          const diffRes = execGit(["diff", `${baseRef}..${branch}`])
+          const statRes = execGit(["diff", "--stat", `${baseRef}..${branch}`])
+
+          return {
+            content: `Diff for ${taskId} (${baseRef}..${branch}):\n${statRes.stdout || "No changes."}\n\n${diffRes.stdout || ""}`,
+            hasChanges: diffRes.stdout.length > 0,
+            stat: statRes.stdout,
+          }
+        }
+
+        if (action === "merge") {
+          if (!taskId) return { content: "Error: taskId is required for merge." }
+          const branch = `teamwork/${runId}-${taskId}`
+          const sentinelDir = join(runWorktreesDir, "sentinel")
+          const targetCwd = existsSync(sentinelDir) ? sentinelDir : root
+
+          const mergeRes = execGit(["merge", "--no-ff", branch, "-m", `Merge task ${taskId} (${branch})`], targetCwd)
+          if (mergeRes.code !== 0) {
+            const conflictingFiles = mergeRes.stdout
+              .split("\n")
+              .filter((l) => l.includes("CONFLICT"))
+              .map((l) => clean(l.replace(/CONFLICT\s*\([^)]*\):\s*/, ""), 120))
+
+            const oursDiff = execGit(["diff", `${branch}...${baseBranch}`], targetCwd).stdout
+            const theirsDiff = execGit(["diff", `${baseBranch}...${branch}`], targetCwd).stdout
+
+            execGit(["merge", "--abort"], targetCwd)
+
+            const synDir = join(run, "synthesis")
+            mkdirSync(synDir, { recursive: true })
+            const conflictFile = join(synDir, `conflict-${taskId}.json`)
+            const conflictArtifact = {
+              taskId,
+              sessionId: runId,
+              baseBranch,
+              incomingBranch: branch,
+              conflictingFiles,
+              diffOurs: oursDiff.slice(0, 10000),
+              diffTheirs: theirsDiff.slice(0, 10000),
+              timestamp: new Date().toISOString(),
+            }
+            writeJson(conflictFile, conflictArtifact)
+
+            return {
+              content: `MERGE CONFLICT for task ${taskId} into ${baseBranch}:\n${conflictingFiles.join("\n") || mergeRes.stderr || mergeRes.stdout}\n\nConflict artifact generated at: ${conflictFile}\n(Merge was aborted; worktree remains clean. Sentinel should dispatch team/synthesizer to resolve conflict.)`,
+              conflict: true,
+              conflictArtifact: conflictFile,
+              conflictingFiles,
+              output: mergeRes.stdout,
+            }
+          }
+
+          return {
+            content: `Successfully merged ${branch} into ${baseBranch}.\n${mergeRes.stdout}`,
+            conflict: false,
+            merged: true,
+          }
+        }
+
+        if (action === "resolve") {
+          if (!taskId) return { content: "Error: taskId is required for resolve." }
+          const sentinelDir = join(runWorktreesDir, "sentinel")
+          const targetCwd = existsSync(sentinelDir) ? sentinelDir : root
+          const statusRes = execGit(["status", "--porcelain"], targetCwd)
+          if (!statusRes.stdout) {
+            return { content: `No modified files to commit for conflict resolution in ${sentinelDir}.` }
+          }
+          execGit(["add", "-A"], targetCwd)
+          const commitMsg = clean(input.commitMessage || `Resolve merge conflict for task ${taskId}`, 200)
+          const commitRes = execGit(["commit", "-m", commitMsg], targetCwd)
+          return {
+            content: `Committed conflict resolution for ${taskId}:\n${commitRes.stdout}`,
+            resolved: true,
+          }
+        }
+
+        if (action === "cleanup") {
+          if (existsSync(runWorktreesDir)) {
+            execGit(["worktree", "prune"])
+            try {
+              const entries = readdirSync(runWorktreesDir)
+              for (const entry of entries) {
+                const p = join(runWorktreesDir, entry)
+                execGit(["worktree", "remove", "--force", p])
+              }
+            } catch {}
+            execGit(["worktree", "prune"])
+          }
+          return {
+            content: `Cleaned up worktrees for run ${runId} at ${runWorktreesDir}.`,
+            cleaned: true,
+          }
+        }
+
+        return { content: `Error: unknown action "${action}". Allowed: setup | diff | merge | resolve | cleanup` }
+      },
+    })
   })
 }
 
@@ -635,12 +1627,30 @@ export async function registerTeamworkHooks(ctx: any, root: string) {
     throw new Error("teamwork: permission API unavailable — refusing to load without the read-only guardrail")
   }
 
-  // Read-only guarantee for critic/verifier agents, enforced in code.
+  // Read-only guarantee for critic/verifier/security-auditor agents, enforced in code.
   await ctx.permission.hook("evaluate", (event: any) => {
     const deny = READ_ONLY_ACTIONS[event.agent]
     if (deny && deny.has(event.action)) {
       event.effect = "deny"
-      event.message = `${event.agent} is read-only during a Teamwork run (${event.action} denied).`
+      event.message = `${event.agent} is restricted during a Teamwork run (${event.action} denied).`
+      return
+    }
+
+    // Network constraint enforcement for worker/verifier
+    if (event.action === "webfetch" && (event.agent === "team/worker" || event.agent === "team/verifier")) {
+      const { run } = resolveRun(root)
+      if (run) {
+        try {
+          const specPath = join(run, "prompt_draft.md")
+          if (existsSync(specPath)) {
+            const specText = readFileSync(specPath, "utf8")
+            if (/network:\s*["']?denied["']?/i.test(specText)) {
+              event.effect = "deny"
+              event.message = "Network access is denied by run spec constraints."
+            }
+          }
+        } catch {}
+      }
     }
   })
 

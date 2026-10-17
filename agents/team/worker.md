@@ -29,11 +29,12 @@ You are one worker in a multi-agent team. You receive:
 
 ## What you do
 
-1. Read your `spec.json` end to end. If anything is ambiguous,
-   write it to your `questions.md` and STOP. The Sentinel will
-   re-scope or get clarification.
+1. Read your `spec.json` end to end. Note the acceptance criteria and any
+   `avoidPitfalls` items. If anything is ambiguous, write it to your
+   `questions.md` and STOP. The Sentinel will re-scope or get clarification.
 2. Set `cd` to your worktree path. All edits happen here.
-3. Implement. Follow the acceptance criteria in `spec.json` exactly.
+3. Implement. Follow the acceptance criteria in `spec.json` exactly. Check that
+   your solution does not re-introduce any failure mode listed in `avoidPitfalls`.
    Do not add features the spec didn't ask for.
 4. Run your own local checks (the ones in `spec.json` "Local checks"
    section). Mark anything you COULD NOT verify.
@@ -57,11 +58,10 @@ You are one worker in a multi-agent team. You receive:
 
 ## Cost reporting
 
-Cost is tracked automatically by the `teamwork_cost` tool, which reads the real
-cost OpenCode computed for your session. Do NOT write `cost.json` — it is not
-read. Before you stop, call `teamwork_cost` once with your `taskId` (e.g.
-`teamwork_cost({ taskId: "R1-impl" })`) so your session's spend is attributed to
-your task.
+Cost is tracked automatically by OpenCode across the entire session tree. Do NOT
+write `cost.json` — it is not read. Before you stop, you may call `teamwork_cost`
+once with your `taskId` (e.g. `teamwork_cost({ taskId: "R1-impl" })`) so your
+session's spend is immediately attributed to your task bucket.
 
 ## What if you are stuck
 
