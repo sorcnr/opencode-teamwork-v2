@@ -7,8 +7,9 @@
 //   opencode-teamwork status    show what is currently configured
 //   opencode-teamwork help
 
-import { existsSync, readFileSync } from "node:fs"
-import { join } from "node:path"
+import { existsSync, lstatSync, readFileSync, realpathSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
 import {
   PACKAGE_NAME,
   TEAM_AGENTS,
@@ -27,6 +28,7 @@ import { detectAvailableModels, pickModels, applyOverrides } from "../lib/picker
 import { listTeamworkRuns, inspectTeamworkRun, pruneTeamworkWorktrees } from "../lib/runs.mjs"
 import { runDoctor } from "../lib/doctor.mjs"
 import { buildTimeline, renderTimeline, timelineWarnings } from "../lib/timeline.mjs"
+import { buildExportData, renderExport } from "../lib/export.mjs"
 
 // Echo a user-supplied value in an error message: control characters become "?"
 // and the value is capped, so a hostile argv cannot inject escapes or bloat stderr.
@@ -47,6 +49,7 @@ Commands:
   runs       List active and past Teamwork runs in .opencode/teamwork/
   inspect    Inspect DAG, task progress, security report and costs for a run
   timeline   Show per-task lifecycle timing, rounds, and cost for a run (--json for raw data)
+  export     Render a run as an offline HTML report (default) or Markdown (-m)
   prune      Prune git worktrees for completed Teamwork runs
   doctor     Diagnose config, agents, model sync and git/worktree health
   help       Show this help
@@ -55,8 +58,12 @@ Options:
   -y, --yes              Accept current/default models without prompting
       --all <model>      Use one model for every agent (e.g. anthropic/claude-sonnet-4-5)
       --model <id>=<m>   Override one agent (repeatable), id may omit the "team/" prefix
-      --session <id>     Target a specific session ID (for inspect or prune)
+      --session <id>     Target a specific session ID (for inspect, prune or export)
       --json             Print doctor or timeline output as raw JSON
+      --html             Export as HTML (default for export)
+  -m, --markdown         Export as Markdown (for export)
+  -o, --output <file>    Export destination (for export); "-" streams to stdout
+                         Default: .opencode/teamwork/<id>/report.html (or report.md)
       --no-color         Disable ANSI colours (for timeline)
       --no-register      Don't touch opencode.json(c)
       --refresh          Overwrite agent prompt bodies with the shipped versions
@@ -67,7 +74,7 @@ Options:
 `
 
 function parseArgs(argv) {
-  const options = { command: undefined, yes: false, all: undefined, assignments: {}, register: true, dryRun: false, refresh: false, configDir: undefined, session: undefined, json: false, noColor: false, help: false }
+  const options = { command: undefined, yes: false, all: undefined, assignments: {}, register: true, dryRun: false, refresh: false, configDir: undefined, session: undefined, json: false, noColor: false, help: false, markdown: false, output: undefined }
   const rest = [...argv]
   options.command = rest.shift()
   while (rest.length) {
@@ -108,12 +115,24 @@ function parseArgs(argv) {
       case "--no-color":
         options.noColor = true
         break
+      case "--html":
+        options.markdown = false
+        break
+      case "-m":
+      case "--markdown":
+        options.markdown = true
+        break
+      case "-o":
+      case "--output":
+        // "" (missing value) is rejected by exportCommand; "-" means stdout.
+        options.output = rest.shift() ?? ""
+        break
       case "-h":
       case "--help":
         options.help = true
         break
       default:
-        if (arg && !options.session && (options.command === "inspect" || options.command === "prune" || options.command === "timeline") && !arg.startsWith("-")) {
+        if (arg && !options.session && (options.command === "inspect" || options.command === "prune" || options.command === "timeline" || options.command === "export") && !arg.startsWith("-")) {
           options.session = arg
         } else if (arg) {
           console.warn(`Ignoring unknown argument: ${arg}`)
@@ -306,6 +325,107 @@ function timelineCommand(options) {
   for (const line of renderTimeline(timeline, { color })) console.log(line)
 }
 
+const SESSION_ID_RE = /^[0-9A-Za-z][0-9A-Za-z._-]{0,63}$/
+
+// Resolve a path through symlinks where it exists; otherwise fall back to resolve().
+function realOrResolved(p) {
+  try {
+    return realpathSync(p)
+  } catch {
+    return resolve(p)
+  }
+}
+
+function isWithin(child, parent) {
+  const rel = relative(parent, child)
+  return rel === "" || (!isAbsolute(rel) && rel !== ".." && !rel.startsWith(`..${sep}`))
+}
+
+// Validate an explicit -o target. Returns { path } or { error }.
+// Allowed: inside the project root or the OS temp dir. Traversal segments are refused outright.
+function resolveExportOutput(rawOutput, root) {
+  if (rawOutput === "") return { error: "-o / --output requires a file path (use -o - for stdout)" }
+  if (rawOutput.startsWith("-")) return { error: `Refusing output path "${safeEcho(rawOutput, 200)}": paths starting with "-" are not accepted (use -o - for stdout)` }
+  if (rawOutput.split(/[\\/]/).includes("..")) return { error: `Refusing output path "${safeEcho(rawOutput, 200)}": traversal segments ("..") are not allowed` }
+  const target = resolve(root, rawOutput)
+  const parent = realOrResolved(dirname(target))
+  const candidate = join(parent, basename(target))
+  try {
+    if (lstatSync(candidate).isSymbolicLink()) return { error: `Refusing output path "${safeEcho(rawOutput, 200)}": target is a symlink` }
+  } catch {}
+  const allowedRoots = [realOrResolved(root), realOrResolved(tmpdir())]
+  if (!allowedRoots.some((base) => isWithin(candidate, base))) {
+    return { error: `Refusing output path "${safeEcho(rawOutput, 200)}": must be inside the project root or the temp directory (${safeEcho(allowedRoots[0], 200)}, ${safeEcho(allowedRoots[1], 200)})` }
+  }
+  return { path: candidate }
+}
+
+function exportCommand(options) {
+  const root = process.cwd()
+  let sessionId = options.session
+  if (sessionId === undefined) {
+    const runs = listTeamworkRuns(root)
+    if (!runs.length) {
+      console.error("No Teamwork runs found in .opencode/teamwork/ (nothing to export)")
+      process.exitCode = 1
+      return
+    }
+    sessionId = runs[0].sessionId
+  }
+  if (typeof sessionId !== "string" || !SESSION_ID_RE.test(sessionId)) {
+    console.error(`Invalid session id "${safeEcho(sessionId)}": must match ^[0-9A-Za-z][0-9A-Za-z._-]{0,63}$`)
+    process.exitCode = 1
+    return
+  }
+
+  const format = options.markdown ? "markdown" : "html"
+  const data = buildExportData(root, sessionId)
+  if (data.error) {
+    console.error(data.error)
+    process.exitCode = 1
+    return
+  }
+  const doc = renderExport(data, { format })
+
+  if (options.output === "-") {
+    // Ignore EPIPE when the reader (e.g. `| head`) closes early; report anything else.
+    process.stdout.on("error", (err) => {
+      if (err?.code === "EPIPE") return
+      console.error(`Could not write to stdout: ${safeEcho(err?.code || err?.message, 120)}`)
+      process.exitCode = 1
+    })
+    process.stdout.write(doc)
+    return
+  }
+
+  let target
+  if (options.output === undefined) {
+    target = join(root, ".opencode", "teamwork", sessionId, format === "markdown" ? "report.md" : "report.html")
+  } else {
+    const resolved = resolveExportOutput(options.output, root)
+    if (resolved.error) {
+      console.error(resolved.error)
+      process.exitCode = 1
+      return
+    }
+    target = resolved.path
+  }
+
+  try {
+    if (lstatSync(target, { throwIfNoEntry: false })?.isSymbolicLink()) {
+      console.error(`Refusing to write ${safeEcho(target, 200)}: target is a symlink`)
+      process.exitCode = 1
+      return
+    }
+    writeFileSync(target, doc, { encoding: "utf8", flag: "w" })
+  } catch (err) {
+    console.error(`Could not write ${safeEcho(target, 200)}: ${safeEcho(err?.code || err?.message, 120)}`)
+    process.exitCode = 1
+    return
+  }
+  console.log(target)
+}
+
 function pruneCommand(options) {
   const res = pruneTeamworkWorktrees(process.cwd(), {
     all: Boolean(options.all),
@@ -356,7 +476,7 @@ async function main() {
     console.log(HELP)
     return
   }
-  if (!["init", "models", "install", "status", "runs", "inspect", "timeline", "prune", "doctor"].includes(command)) {
+  if (!["init", "models", "install", "status", "runs", "inspect", "timeline", "export", "prune", "doctor"].includes(command)) {
     console.error(`Unknown command: ${command}\n`)
     console.log(HELP)
     process.exitCode = 1
@@ -367,6 +487,7 @@ async function main() {
   if (command === "runs") return runsCommand()
   if (command === "inspect") return inspectCommand(options)
   if (command === "timeline") return timelineCommand(options)
+  if (command === "export") return exportCommand(options)
   if (command === "prune") return pruneCommand(options)
   if (command === "doctor") return doctorCommand(options)
   if (command === "install") {
