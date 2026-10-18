@@ -1,9 +1,9 @@
 import { registerTeamworkTools } from "../plugins/opencode-teamwork/tools.ts"
 import { listTeamworkRuns, inspectTeamworkRun, pruneTeamworkWorktrees } from "../lib/runs.mjs"
 import { currentModels, readRawModelMap, writeModelMap, installAgents, DEFAULT_MODELS } from "../lib/team.mjs"
-import { mkdtempSync, rmSync, writeFileSync, existsSync, mkdirSync } from "node:fs"
+import { mkdtempSync, rmSync, writeFileSync, existsSync, mkdirSync, readFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import { execFileSync } from "node:child_process"
 import assert from "node:assert"
 
@@ -352,6 +352,220 @@ try {
     console.log("✓ Model map priority resolution verified (teamwork.json > agent files > defaults)")
   } finally {
     rmSync(configTestDir, { recursive: true, force: true })
+  }
+
+  // ==========================================
+  // Part 6: Attribution — actor identity, taskId buckets, byTaskTokens
+  // ==========================================
+  console.log("Testing attribution (actor identity, taskId buckets, byTaskTokens)...")
+
+  // Hermetic OpenCode environment: HOME and every XDG/AppData root that
+  // tools.ts consults point at a temp dir, so the real opencode.db and
+  // service.json are never read. The fake session DB lives in there too.
+  const ENV_KEYS = ["HOME", "USERPROFILE", "XDG_DATA_HOME", "XDG_STATE_HOME", "LOCALAPPDATA"]
+  async function withIsolatedOpencodeEnv(fn) {
+    const home = mkdtempSync(join(testDir, "home-"))
+    const saved = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]))
+    process.env.HOME = home
+    process.env.USERPROFILE = home
+    process.env.XDG_DATA_HOME = join(home, "data")
+    process.env.XDG_STATE_HOME = join(home, "state")
+    process.env.LOCALAPPDATA = join(home, "localappdata")
+    try {
+      return await fn({ dbPath: join(home, "data", "opencode", "opencode.db") })
+    } finally {
+      for (const k of ENV_KEYS) {
+        if (saved[k] === undefined) delete process.env[k]
+        else process.env[k] = saved[k]
+      }
+    }
+  }
+
+  // Seed the session_v2 table that tools.ts reads through node:sqlite (falls
+  // back to the sqlite3 CLI when node:sqlite is unavailable).
+  async function seedSessionDb(dbPath, rows) {
+    mkdirSync(dirname(dbPath), { recursive: true })
+    const ddl = `DROP TABLE IF EXISTS session_v2;
+      CREATE TABLE session_v2 (id TEXT PRIMARY KEY, parent_id TEXT, agent TEXT, cost REAL,
+        tokens_input INTEGER, tokens_output INTEGER, tokens_reasoning INTEGER,
+        tokens_cache_read INTEGER, tokens_cache_write INTEGER);`
+    const values = rows.map(
+      (r) =>
+        `INSERT INTO session_v2 VALUES ('${r.id}', ${r.parent ? `'${r.parent}'` : "NULL"}, ${r.agent ? `'${r.agent}'` : "NULL"}, ${r.cost}, ${r.t.input}, ${r.t.output}, ${r.t.reasoning}, ${r.t.read}, ${r.t.write});`,
+    )
+    let db
+    try {
+      const { DatabaseSync } = await import("node:sqlite")
+      db = new DatabaseSync(dbPath)
+      db.exec(ddl + values.join("\n"))
+      db.close()
+    } catch (err) {
+      try {
+        db?.close()
+      } catch {}
+      execFileSync("sqlite3", [dbPath], { input: ddl + values.join("\n"), stdio: ["pipe", "pipe", "pipe"] })
+    }
+  }
+
+  const ROOT_SES = "ses_attr_root"
+  const CHILD_SES = "ses_attr_worker"
+  const ZERO_T = { input: 0, output: 0, reasoning: 0, read: 0, write: 0 }
+  const rootRow = { id: ROOT_SES, parent: null, agent: "sentinel", cost: 0, t: ZERO_T }
+  const workerRow = (cost, t) => ({ id: CHILD_SES, parent: ROOT_SES, agent: "team/worker", cost, t })
+  const T1 = { input: 1000, output: 200, reasoning: 10, read: 50, write: 5 }
+
+  const runFile = (root, runId, name) => join(root, ".opencode", "teamwork", runId, name)
+  const readEvents = (root, runId) =>
+    readFileSync(runFile(root, runId, "events.jsonl"), "utf8")
+      .split("\n")
+      .filter((l) => l !== "")
+      .map((l) => JSON.parse(l))
+
+  /** A fresh project root with the real tools registered and a run planned by the root session. */
+  async function attrFixture(runId, planAgent = "team/worker") {
+    const root = mkdtempSync(join(testDir, "attr-"))
+    const tools = {}
+    await registerTeamworkTools(
+      {
+        tool: {
+          transform: async (cb) => {
+            await cb({
+              namespace: () => {},
+              add: (tool) => {
+                tools[tool.name] = tool
+              },
+            })
+          },
+        },
+        session: { get: async () => undefined },
+      },
+      root,
+    )
+    await tools.plan.execute(
+      { sessionId: runId, topology: "iterative-coding", tasks: [{ id: "alpha", agent: planAgent }] },
+      { sessionID: ROOT_SES },
+    )
+    return { root, tools }
+  }
+
+  const RUN_A = "20261018-000000-attr1"
+  const RUN_B = "20261018-000000-attr2"
+  const RUN_C = "20261018-000000-attr3"
+  const RUN_D = "20261018-000000-attr4"
+
+  await withIsolatedOpencodeEnv(async ({ dbPath }) => {
+    // --- 6a: non-root spend WITH a taskId buckets to the task, not to the agent.
+    {
+      const f = await attrFixture(RUN_A)
+      await seedSessionDb(dbPath, [rootRow, workerRow(0.3, T1)])
+      const res = await f.tools.cost.execute({ sessionId: RUN_A, taskId: "alpha" }, { sessionID: ROOT_SES })
+      assert(res.content.includes("opencode database"), `spend must come from the session DB, got: ${res.content}`)
+      const costs = JSON.parse(readFileSync(runFile(f.root, RUN_A, "costs.json"), "utf8"))
+      assert.strictEqual(costs.byTask.alpha, 0.3, "subagent spend must bucket to the taskId")
+      assert.strictEqual(costs.byTask["team/worker"], undefined, "byTask['team/worker'] must NOT grow when a taskId is given")
+      assert.deepStrictEqual(Object.keys(costs.byTask), ["alpha"])
+      assert.strictEqual(costs.spentUsd, 0.3)
+      console.log("✓ non-root spend with taskId buckets to the task; byTask['team/worker'] does not grow")
+    }
+
+    // --- 6b: the SAME fixture WITHOUT a taskId keeps the legacy agent-name bucket.
+    {
+      const f = await attrFixture(RUN_B)
+      await seedSessionDb(dbPath, [rootRow, workerRow(0.3, T1)])
+      await f.tools.cost.execute({ sessionId: RUN_B }, { sessionID: ROOT_SES })
+      const costs = JSON.parse(readFileSync(runFile(f.root, RUN_B, "costs.json"), "utf8"))
+      assert.strictEqual(costs.byTask["team/worker"], 0.3, "without a taskId, non-root spend must bucket by agent name")
+      assert.deepStrictEqual(Object.keys(costs.byTask), ["team/worker"], "no task bucket may appear without a taskId")
+      assert.deepStrictEqual(Object.keys(costs.byTaskTokens), ["team/worker"], "byTaskTokens keys must mirror byTask")
+      console.log("✓ without taskId, non-root spend still buckets by agent name (legacy regression guard)")
+    }
+
+    // --- 6c: byTaskTokens accumulates the token DELTA with the exact shape and values.
+    {
+      const f = await attrFixture(RUN_C)
+      await seedSessionDb(dbPath, [rootRow, workerRow(0.3, T1)])
+      await f.tools.cost.execute({ sessionId: RUN_C, taskId: "alpha" }, { sessionID: ROOT_SES })
+      // Second call: the worker has spent more. Only the delta may be added.
+      await seedSessionDb(dbPath, [rootRow, workerRow(0.45, { input: 1500, output: 300, reasoning: 10, read: 50, write: 5 })])
+      await f.tools.cost.execute({ sessionId: RUN_C, taskId: "alpha" }, { sessionID: ROOT_SES })
+      const costs = JSON.parse(readFileSync(runFile(f.root, RUN_C, "costs.json"), "utf8"))
+      assert.strictEqual(costs.byTask.alpha, 0.45, "cost must accumulate 0.3 + 0.15 delta")
+      assert.deepStrictEqual(costs.byTaskTokens.alpha, {
+        input: 1500,
+        output: 300,
+        reasoning: 10,
+        cache: { read: 50, write: 5 },
+      }, "byTaskTokens must accumulate the token delta exactly")
+      const bucket = costs.byTaskTokens.alpha
+      assert.deepStrictEqual(Object.keys(bucket).sort(), ["cache", "input", "output", "reasoning"])
+      assert.deepStrictEqual(Object.keys(bucket.cache).sort(), ["read", "write"])
+      for (const v of [bucket.input, bucket.output, bucket.reasoning, bucket.cache.read, bucket.cache.write]) {
+        assert(Number.isFinite(v) && Number.isInteger(v) && v >= 0, `token value must be a finite non-negative integer, got ${v}`)
+      }
+      assert.deepStrictEqual(Object.keys(costs.byTaskTokens).sort(), Object.keys(costs.byTask).sort(), "byTaskTokens keys must match byTask keys")
+      console.log("✓ byTaskTokens accumulates the exact token delta with the {input,output,reasoning,cache} shape")
+    }
+
+    // --- 6d: a pre-existing costs.json WITHOUT byTaskTokens is tolerated.
+    {
+      const f = await attrFixture(RUN_D)
+      const file = runFile(f.root, RUN_D, "costs.json")
+      const legacy = JSON.parse(readFileSync(file, "utf8"))
+      delete legacy.byTaskTokens
+      writeFileSync(file, JSON.stringify(legacy, null, 2) + "\n")
+      await seedSessionDb(dbPath, [rootRow, workerRow(0.3, T1)])
+      const res = await f.tools.cost.execute({ sessionId: RUN_D, taskId: "alpha" }, { sessionID: ROOT_SES })
+      assert(res.content.includes("Budget:"), `cost must complete without crashing, got: ${res.content}`)
+      const costs = JSON.parse(readFileSync(file, "utf8"))
+      assert.strictEqual(costs.byTask.alpha, 0.3)
+      assert.strictEqual(costs.byTaskTokens.alpha.input, 1000, "a legacy costs.json must gain the byTaskTokens bucket")
+      console.log("✓ pre-existing costs.json without byTaskTokens is tolerated")
+    }
+  })
+
+  // --- 6e: actor identity recorded in events.jsonl (explicit agent wins).
+  {
+    const f = await attrFixture("20261018-000000-actor")
+    const RUN = "20261018-000000-actor"
+    const before = readEvents(f.root, RUN).length
+    await f.tools.task_update.execute({ sessionId: RUN, taskId: "alpha", status: "worker_active", agent: "team/worker" })
+    await f.tools.task_update.execute({ sessionId: RUN, taskId: "alpha", status: "worker_done", agent: "team/worker" })
+    await f.tools.task_update.execute({ sessionId: RUN, taskId: "alpha", status: "verifier_active", agent: "team/verifier" })
+    const events = readEvents(f.root, RUN)
+    assert.strictEqual(events.length, before + 3, "exactly one event per transition")
+    const [wa, wd, va] = events.slice(-3)
+    assert.strictEqual(wa.agent, "team/worker", "explicit team/worker must be the recorded actor")
+    assert.strictEqual(wd.agent, "team/worker")
+    assert.strictEqual(va.agent, "team/verifier", "explicit team/verifier must be the recorded actor")
+    console.log("✓ explicit agent (team/worker and team/verifier) is recorded as the actor in events.jsonl")
+  }
+
+  // --- 6f: with no explicit agent and no calling session, the plan-declared agent is the fallback.
+  {
+    const RUN = "20261018-000000-plan"
+    const f = await attrFixture(RUN, "team/worker")
+    await f.tools.task_update.execute({ sessionId: RUN, taskId: "alpha", status: "worker_active" })
+    const last = readEvents(f.root, RUN).at(-1)
+    assert.strictEqual(last.agent, "team/worker", "plan-declared agent must be the fallback actor")
+    console.log("✓ plan-declared agent is the fallback actor when none is supplied")
+  }
+
+  // --- 6g: a garbage agent with control characters cannot inject a second JSONL line.
+  {
+    const RUN = "20261018-000000-inject"
+    const f = await attrFixture(RUN)
+    const file = runFile(f.root, RUN, "events.jsonl")
+    const linesBefore = readFileSync(file, "utf8").split("\n").filter((l) => l !== "").length
+    const garbage = 'team/worker\n{"event":"injected"}\u2028FAKE'
+    await f.tools.task_update.execute({ sessionId: RUN, taskId: "alpha", status: "worker_active", agent: garbage })
+    const raw = readFileSync(file, "utf8")
+    const physical = raw.split("\n").filter((l) => l !== "")
+    assert.strictEqual(physical.length, linesBefore + 1, "the garbage agent must add exactly one physical line")
+    for (const line of physical) assert.doesNotThrow(() => JSON.parse(line), `every line must parse: ${line}`)
+    assert(!raw.includes("\u2028"), "no raw line separator may reach events.jsonl")
+    // Sanitised value, not the raw garbage: control characters become spaces.
+    assert.strictEqual(JSON.parse(physical.at(-1)).agent, 'team/worker {"event":"injected"} FAKE', "agent must be recorded sanitised")
+    console.log("✓ garbage agent with newline cannot inject a second JSONL line; recorded value is sanitised")
   }
 } finally {
   rmSync(testDir, { recursive: true, force: true })
