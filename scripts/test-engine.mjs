@@ -436,7 +436,7 @@ try {
       .map((l) => JSON.parse(l))
 
   /** A fresh project root with the real tools registered and a run planned by the root session. */
-  async function attrFixture(runId, planAgent = "team/worker") {
+  async function attrFixture(runId, planAgent = "team/worker", taskIds = ["alpha"]) {
     const root = mkdtempSync(join(testDir, "attr-"))
     const tools = {}
     await registerTeamworkTools(
@@ -456,7 +456,7 @@ try {
       root,
     )
     await tools.plan.execute(
-      { sessionId: runId, topology: "iterative-coding", tasks: [{ id: "alpha", agent: planAgent }] },
+      { sessionId: runId, topology: "iterative-coding", tasks: taskIds.map((id) => ({ id, agent: planAgent })) },
       { sessionID: ROOT_SES },
     )
     return { root, tools }
@@ -603,4 +603,211 @@ try {
   }
 } finally {
   rmSync(testDir, { recursive: true, force: true })
+}
+
+// ==========================================
+// Part 7: SEC-1 / SEC-3 — prototype-key integrity and tool-result sanitising
+// ==========================================
+{
+  console.log("Testing prototype-key integrity and tool-result sanitising (SEC-1, SEC-3)...")
+  const testDir7 = mkdtempSync(join(tmpdir(), "teamwork-sec1-test-"))
+  const protoSnapshot = () => Reflect.ownKeys(Object.prototype).map(String).sort().join(",")
+  const protoBefore = protoSnapshot()
+  const hasOwn = (o, k) => Object.prototype.hasOwnProperty.call(o, k)
+  const costsOf = (root, runId) => JSON.parse(readFileSync(join(root, ".opencode", "teamwork", runId, "costs.json"), "utf8"))
+  const stateOf = (root, runId) => JSON.parse(readFileSync(join(root, ".opencode", "teamwork", runId, "state.json"), "utf8"))
+  // Any C0/DEL/C1 control character (incl. ESC, BEL, CSI U+009B, U+0085) in tool output.
+  const CTRL = /[\x00-\x1f\x7f-\x9f]/
+  const ENV7 = ["HOME", "USERPROFILE", "XDG_DATA_HOME", "XDG_STATE_HOME", "LOCALAPPDATA"]
+  const saved7 = Object.fromEntries(ENV7.map((k) => [k, process.env[k]]))
+  const home7 = mkdtempSync(join(testDir7, "home-"))
+  // Isolate from the real opencode.db / service.json so the manual addUsd path is deterministic.
+  process.env.HOME = home7
+  process.env.USERPROFILE = home7
+  process.env.XDG_DATA_HOME = join(home7, "data")
+  process.env.XDG_STATE_HOME = join(home7, "state")
+  process.env.LOCALAPPDATA = join(home7, "localappdata")
+
+  try {
+    const fixture = async (runId, taskIds = ["alpha"]) => {
+      const root = mkdtempSync(join(testDir7, "sec1-"))
+      const tools = {}
+      await registerTeamworkTools(
+        {
+          tool: {
+            transform: async (cb) => {
+              await cb({ namespace: () => {}, add: (tool) => (tools[tool.name] = tool) })
+            },
+          },
+          session: { get: async () => undefined },
+        },
+        root,
+      )
+      const planRes = await tools.plan.execute({ sessionId: runId, topology: "iterative-coding", tasks: taskIds.map((id) => ({ id })) }, {})
+      assert(planRes.content.startsWith("Planned"), `fixture plan must succeed: ${planRes.content}`)
+      return { root, tools }
+    }
+
+    // --- 7a: a legal but Object.prototype-named task id keeps its spend (no NaN, no loss).
+    {
+      const RUN = "20261018-000000-sec1a"
+      const f = await fixture(RUN)
+      const res = await f.tools.cost.execute({ sessionId: RUN, taskId: "constructor", addUsd: 0.25 }, {})
+      assert(!res.content.includes("NaN"), `breakdown must not contain NaN: ${res.content}`)
+      const costs = costsOf(f.root, RUN)
+      assert.strictEqual(costs.spentUsd, 0.25, "spentUsd must reflect the constructor-bucket spend")
+      assert(hasOwn(costs.byTask, "constructor"), "constructor bucket must be persisted as an own key")
+      assert.strictEqual(costs.byTask.constructor, 0.25, "constructor bucket must hold the amount")
+      // A second spend accumulates into the same bucket.
+      await f.tools.cost.execute({ sessionId: RUN, taskId: "constructor", addUsd: 0.5 }, {})
+      assert.strictEqual(costsOf(f.root, RUN).byTask.constructor, 0.75, "constructor bucket must accumulate")
+      console.log("✓ taskId 'constructor' is recorded: no NaN, spentUsd and bucket reflect the amount")
+    }
+
+    // --- 7b: '__proto__' is REJECTED by the allowlist; nothing is recorded or silently dropped.
+    {
+      const RUN = "20261018-000000-sec1b"
+      const f = await fixture(RUN)
+      const res = await f.tools.cost.execute({ sessionId: RUN, taskId: "__proto__", addUsd: 0.5 }, {})
+      assert(res.content.startsWith("refused"), `'__proto__' must be refused by validation, got: ${res.content}`)
+      const costs = costsOf(f.root, RUN)
+      assert.strictEqual(costs.spentUsd, 0, "a refused spend must not change spentUsd")
+      assert(!hasOwn(costs.byTask, "__proto__"), "'__proto__' must not be stored as a bucket")
+      for (const bad of ["../escape", "a/b", "_sentinel", ""]) {
+        const r = await f.tools.cost.execute({ sessionId: RUN, taskId: bad, addUsd: 0.1 }, {})
+        if (bad === "") {
+          assert(!r.content.startsWith("refused"), "an empty taskId is treated as absent, not refused")
+        } else {
+          assert(r.content.startsWith("refused"), `taskId ${JSON.stringify(bad)} must be refused: ${r.content}`)
+        }
+      }
+      console.log("✓ taskId '__proto__' (and path-like ids) are refused by validation, never silently dropped")
+    }
+
+    // --- 7c: a task absent from the plan cannot be injected via an inherited member name.
+    {
+      const RUN = "20261018-000000-sec1c"
+      const f = await fixture(RUN)
+      for (const id of ["constructor", "__proto__", "toString", "hasOwnProperty"]) {
+        const r = await f.tools.task_update.execute({ sessionId: RUN, taskId: id, status: "worker_active" }, {})
+        assert(r.content.startsWith("Error: Task"), `task_update('${id}') for an absent task must be refused: ${r.content}`)
+      }
+      assert.deepStrictEqual(Object.keys(stateOf(f.root, RUN).tasks), ["alpha"], "state.json must gain no phantom task")
+      console.log("✓ task_update for an absent 'constructor'/'__proto__' injects no phantom task")
+    }
+
+    // --- 7d: a plan CAN declare 'constructor' as a normal task, and it works end to end.
+    {
+      const RUN = "20261018-000000-sec1d"
+      const f = await fixture(RUN, ["constructor"])
+      const st = stateOf(f.root, RUN)
+      assert(hasOwn(st.tasks, "constructor"), "planned 'constructor' task must be an own key in state.json")
+      const upd = await f.tools.task_update.execute({ sessionId: RUN, taskId: "constructor", status: "worker_active" }, {})
+      assert(upd.content.startsWith("Task constructor updated"), `valid 'constructor' task must update: ${upd.content}`)
+      assert.strictEqual(stateOf(f.root, RUN).tasks.constructor.status, "worker_active")
+      console.log("✓ a planned task named 'constructor' is an ordinary task")
+    }
+
+    // --- 7e: plan refuses unsafe ids (task or dependsOn) and writes nothing for the refused plan.
+    {
+      const RUN = "20261018-000000-sec1e"
+      const f = await fixture(RUN, ["ok"])
+      const before = readFileSync(join(f.root, ".opencode", "teamwork", RUN, "plan.dag.json"), "utf8")
+      for (const bad of [
+        { tasks: [{ id: "__proto__" }] },
+        { tasks: [{ id: "constructor/../x" }] },
+        { tasks: [{ id: "ok2" }, { id: "a b" }] },
+        { tasks: [{ id: "ok2", dependsOn: ["../up"] }] },
+      ]) {
+        const r = await f.tools.plan.execute({ sessionId: RUN, topology: "iterative-coding", ...bad }, {})
+        assert(r.content.startsWith("refused"), `plan with unsafe id must be refused: ${r.content}`)
+      }
+      const after = readFileSync(join(f.root, ".opencode", "teamwork", RUN, "plan.dag.json"), "utf8")
+      assert.strictEqual(after, before, "a refused plan must not overwrite plan.dag.json")
+      console.log("✓ teamwork_plan refuses unsafe task ids and dependsOn before writing anything")
+    }
+
+    // --- 7f: SEC-3 — the branch echoed by task_update carries no raw control characters.
+    {
+      const RUN = "20261018-000000-sec3a"
+      const f = await fixture(RUN)
+      const hostile = "feat\x1b]52;c;SGVsbG8=\x07\u009b31m\x7f\u0085\u2028end"
+      const r = await f.tools.task_update.execute({ sessionId: RUN, taskId: "alpha", status: "worker_active", branch: hostile }, {})
+      assert(r.content.includes("branch=feat"), `branch must still be echoed: ${r.content}`)
+      assert(!CTRL.test(r.content), `tool-result content must carry no control character: ${JSON.stringify(r.content)}`)
+      assert(!r.content.includes("\u2028"), "no line separator in content")
+      console.log("✓ task_update echoes the branch with ESC/OSC52/C1/DEL/U+0085 removed")
+    }
+
+    // --- 7g: SEC-3 — a hostile bucket key (legacy costs.json) is not echoed raw by cost.
+    {
+      const RUN = "20261018-000000-sec3b"
+      const f = await fixture(RUN)
+      const file = join(f.root, ".opencode", "teamwork", RUN, "costs.json")
+      const costs = costsOf(f.root, RUN)
+      costs.byTask = { ["k\x1b]52;c;QQ==\x07\u009b\x7f\u0085z"]: 0.1 }
+      costs.spentUsd = 0.1
+      writeFileSync(file, JSON.stringify(costs))
+      const r = await f.tools.cost.execute({ sessionId: RUN }, {})
+      assert(r.content.includes("$0.1"), `breakdown must still show the amount: ${r.content}`)
+      // The template's own "\n" line separators are allowed; nothing else may be control.
+      assert(!CTRL.test(r.content.replace(/\n/g, "")), `cost breakdown must carry no control character: ${JSON.stringify(r.content)}`)
+      console.log("✓ teamwork_cost echoes bucket keys with ESC/OSC52/C1/DEL/U+0085 removed")
+    }
+
+    // --- 7h: per-task tokens through the session tree still accumulate for a 'constructor' bucket.
+    {
+      let haveSqlite = true
+      try {
+        await import("node:sqlite")
+      } catch {
+        haveSqlite = false
+      }
+      if (!haveSqlite) {
+        console.log("⊘ skipped 'constructor' token-tree test: no node:sqlite")
+      } else {
+        const { DatabaseSync } = await import("node:sqlite")
+        const RUN = "20261018-000000-sec1h"
+        const f = await fixture(RUN)
+        const dbPath = join(home7, "data", "opencode", "opencode.db")
+        mkdirSync(dirname(dbPath), { recursive: true })
+        const db = new DatabaseSync(dbPath)
+        try {
+          db.exec(`DROP TABLE IF EXISTS session_v2;
+            CREATE TABLE session_v2 (id TEXT PRIMARY KEY, parent_id TEXT, agent TEXT, cost REAL,
+              tokens_input INTEGER, tokens_output INTEGER, tokens_reasoning INTEGER,
+              tokens_cache_read INTEGER, tokens_cache_write INTEGER);
+            INSERT INTO session_v2 VALUES ('ses_sec1_root', NULL, 'sentinel', 0, 0, 0, 0, 0, 0);
+            INSERT INTO session_v2 VALUES ('ses_sec1_worker', 'ses_sec1_root', 'team/worker', 0.3, 1000, 200, 10, 50, 5);`)
+        } finally {
+          db.close()
+        }
+        const res = await f.tools.cost.execute({ sessionId: RUN, taskId: "constructor" }, { sessionID: "ses_sec1_root" })
+        assert(!res.content.includes("NaN"), `no NaN in breakdown: ${res.content}`)
+        const costs = costsOf(f.root, RUN)
+        assert.strictEqual(costs.byTask.constructor, 0.3, "worker spend must bucket to 'constructor'")
+        assert.strictEqual(costs.spentUsd, 0.3)
+        assert(hasOwn(costs.byTaskTokens, "constructor"), "byTaskTokens must hold an own 'constructor' key")
+        assert.deepStrictEqual(costs.byTaskTokens.constructor, {
+          input: 1000,
+          output: 200,
+          reasoning: 10,
+          cache: { read: 50, write: 5 },
+        })
+        console.log("✓ per-task tokens accumulate through the session tree for a 'constructor' bucket")
+      }
+    }
+
+    // --- 7i: Object.prototype was never modified by any of the above.
+    assert.strictEqual(protoSnapshot(), protoBefore, "Object.prototype must have no new or removed own keys")
+    assert.strictEqual(({}).spentUsd, undefined, "no global pollution via spentUsd")
+    assert.strictEqual(({}).lastCost, undefined, "no global pollution via lastCost")
+    console.log("✓ Object.prototype is unmodified after all SEC-1/SEC-3 cases")
+  } finally {
+    for (const k of ENV7) {
+      if (saved7[k] === undefined) delete process.env[k]
+      else process.env[k] = saved7[k]
+    }
+    rmSync(testDir7, { recursive: true, force: true })
+  }
 }
