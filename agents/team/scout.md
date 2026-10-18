@@ -1,6 +1,6 @@
 ---
 description: "Read-only context gatherer. Runs FIRST in any long Teamwork run. Pulls the relevant code, git history, related docs, and any failing tests into a single scout-report.md. Never edits."
-mode: subagent
+mode: all
 model: deepseek/deepseek-flash
 color: "#06b6d4"
 hidden: false

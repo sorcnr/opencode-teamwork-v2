@@ -1,6 +1,6 @@
 ---
 description: "Reads multiple candidates + their falsifier critiques and produces one improved candidate. Folds in the strongest pieces, discards the rest, and never re-introduces a flagged failure mode."
-mode: subagent
+mode: all
 model: deepseek/deepseek-v4-pro
 color: "#10b981"
 hidden: false

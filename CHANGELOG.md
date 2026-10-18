@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.4] - 2026-10-18
+
+### Changed
+
+- **Set `mode: all` on all team subagents**:
+  - OpenCode V2's user interface dropdown only displays agents with `mode: primary` or `mode: all` (agents with `mode: subagent` are hidden from the human user interface).
+  - Switched `mode: all` on `worker`, `verifier`, `security-auditor`, `scout`, `synthesizer`, `proof-worker`, `falsifier`, and `proposer`. All 11 team agents can now be seen and selected directly in the OpenCode interface, while remaining fully callable as subagents.
+
 ## [0.5.3] - 2026-10-18
 
 ### Added

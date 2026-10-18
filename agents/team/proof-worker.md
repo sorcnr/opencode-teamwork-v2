@@ -1,6 +1,6 @@
 ---
 description: "Worker specialized for math and formal proofs. Same lifecycle as Worker (scoped spec, own worktree, returns diff + summary) but the diff is a Lean/Coq/Isabelle proof and the verifier is the formal checker."
-mode: subagent
+mode: all
 model: deepseek/deepseek-v4-pro
 color: "#0ea5e9"
 hidden: false

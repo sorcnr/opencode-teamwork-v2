@@ -1,6 +1,6 @@
 ---
 description: "Read-only security auditor. Audits a repository (or a Teamwork run) for guardrail gaps: path traversal, command injection, permission bypass, stored prompt injection, unsafe lifecycle/config writes, secret leakage. Runs with a clean context and never edits."
-mode: subagent
+mode: all
 model: deepseek/deepseek-v4-pro
 color: "#dc2626"
 hidden: false

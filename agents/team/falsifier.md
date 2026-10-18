@@ -1,6 +1,6 @@
 ---
 description: "Attacks a single candidate. Your job is to find flaws. If you cannot find a flaw, you must explicitly say so — silence is not acceptable."
-mode: subagent
+mode: all
 model: deepseek/deepseek-v4-pro
 color: "#ef4444"
 hidden: false

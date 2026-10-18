@@ -1,6 +1,6 @@
 {
   "name": "opencode-teamwork-v2",
-  "version": "0.5.3",
+  "version": "0.5.4",
   "description": "Antigravity-style multi-agent orchestration for OpenCode V2 — 11 agents, 7 commands, interactive model assignment on install.",
   "keywords": [
     "opencode",

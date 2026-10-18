@@ -1,6 +1,6 @@
 ---
 description: "Generates a candidate solution for a Teamwork run. One proposer = one candidate. The orchestrator dispatches multiple proposers in parallel; you never run twice for the same orchestrator prompt."
-mode: subagent
+mode: all
 model: deepseek/deepseek-flash
 color: "#3b82f6"
 hidden: false

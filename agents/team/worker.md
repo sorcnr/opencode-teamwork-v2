@@ -1,6 +1,6 @@
 ---
 description: "Worker — specialized implementation agent. Receives a scoped spec.json + its own git worktree, edits and commits there, returns summary.md."
-mode: subagent
+mode: all
 model: deepseek/deepseek-flash
 color: "#3b82f6"
 hidden: false
