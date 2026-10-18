@@ -10,3 +10,4 @@ dist/
 .opencode-teamwork-backup/
 # teamwork backup files
 .opencode/
+.vscode/
