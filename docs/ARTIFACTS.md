@@ -25,6 +25,7 @@ Every run writes under one root:
 ├── verify/summary.json
 ├── verify/security-audit.json # pre-merge security gate report
 ├── final.md                 # presented result
+├── report.html / report.md  # optional export output (`opencode-teamwork export`)
 └── interrupted.md           # present when the user stops a run
 ```
 
@@ -393,4 +394,50 @@ One line per entry:
 
 Free-form markdown following the section structure described in the scout,
 proposer, falsifier and synthesizer agent files.
+
+## Export report (`report.html` / `report.md`)
+
+`opencode-teamwork export` writes a human-readable report of one run. It is a
+reporting output only: it is read by no engine tool, no agent, and no gate, and
+deleting it changes nothing about the run.
+
+**Where it is written.** Without `-o`, the file goes to the run directory:
+
+- HTML (default): `.opencode/teamwork/<session-id>/report.html`
+- Markdown (`-m` / `--markdown`): `.opencode/teamwork/<session-id>/report.md`
+
+The CLI prints the **absolute** path of the file it wrote. With `-o <file>` the
+report goes to that path instead. With `-o -` it is streamed to stdout and no file
+is written. The export reads the run directory and never modifies it.
+
+**Format: HTML.** A standalone single-file document. CSS is embedded in a `<style>`
+block, and the file has no external CDN, fonts, scripts, or images. It works fully
+offline and is safe to attach to an issue or archive. Dynamic text is HTML-escaped,
+and absolute `http(s)://` URLs in quoted text are defanged, so the file contains no
+live links.
+
+**Format: Markdown.** GitHub-flavored Markdown with tables and a checklist. It is
+suitable for pasting into a PR description or an issue comment.
+
+**Contents** (both formats, in this order):
+
+| Section | Source |
+| --- | --- |
+| Summary | `plan.dag.json`, `state.json`, `costs.json`, `events.jsonl`: session id, topology, overall status, phase, duration, budget, spend, tokens, task totals |
+| Tasks | one row per task: status, worker, verifier, rounds, duration, cost, checks. Details: summary, feedback, fatal findings, branch, worktree |
+| Acceptance checklist | (Markdown) one box per task, ticked when `verified_pass`, plus the security gate |
+| Security audit | `verify/security-audit.json`: pre-merge status, severity counts, findings |
+| Final verification | `verify/final.json`, when present |
+| Pitfalls | `pitfalls.md` entries |
+| Other cost buckets | cost buckets that are not task ids (HTML only, when present) |
+| Warnings | files that were oversize, unreadable, or malformed and were skipped |
+
+The overall status is `PASS` only when every task is `verified_pass` and the audit
+did not fail. It is `FAIL` when any task is `verified_fail` or `blocked`, or when
+the audit fails. Otherwise it is `INCOMPLETE`. Missing `events.jsonl` data is shown
+as "timing unknown" rather than guessed.
+
+**Errors.** A missing or invalid run (no run directory, or no valid
+`plan.dag.json` / `state.json`) makes `export` exit with code `1`, as does a
+file-write error.
 
