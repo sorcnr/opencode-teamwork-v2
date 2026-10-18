@@ -4,6 +4,27 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.5] - 2026-10-18
+
+### Added
+
+- **`opencode-teamwork timeline <session-id>` command**:
+  - Renders a Teamwork run's complete lifecycle in the terminal as a chronological, ANSI-colored timeline (supports `--no-color` and `--json`).
+  - Supports both `events` mode (exact wall-clock timings from `events.jsonl`) and honest `derived` mode (`[APPROX]`, no fabricated durations).
+  - Timezone-invariant date parsing and formatting.
+  - Added 65 hermetic tests in `scripts/test-timeline.mjs` wired into `npm test`.
+- **Engine Events Log (`events.jsonl`)**:
+  - Appends JSONL events on lifecycle transitions (`run_created`, `task_transition`, `security_audit`) inside locked sections, recording the actual calling actor identity (`team/worker`, `team/verifier`, etc.).
+- **Per-Task Cost & Token Attribution**:
+  - `costs.json` now records additive `byTaskTokens` (per-task token deltas) alongside task-specific spend, surfaced by the timeline.
+
+### Security & Hardening
+
+- **SEC-1 (Path Traversal in Worktrees)**: Fixed critical arbitrary recursive directory deletion vulnerability in `worktree setup` by introducing strict `TASK_ID` regex allowlist validation and `path.relative()` containment assertions.
+- **SEC-2 (Prototype Pollution)**: Converted `byTask`, `byTaskTokens`, and `state.tasks` to null-prototype maps (`Object.create(null)`) with `hasOwnProperty` checks, preventing `constructor` and `__proto__` task IDs from producing NaN, dropping spend, or injecting phantom tasks.
+- **SEC-3 (Terminal ANSI / OSC 52 Injection)**: Stripped control characters, OSC 52 clipboard sequences, and C1 bytes from branch names and echoes.
+- **SEC-4 (Bounded Safe Reads)**: Replaced unbounded file reads with explicit reason codes (`oversize`, `unreadable`, `absent`, `ok`) and a 64 MiB ceiling.
+
 ## [0.5.4] - 2026-10-18
 
 ### Changed

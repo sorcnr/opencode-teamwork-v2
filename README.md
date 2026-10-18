@@ -38,11 +38,13 @@ lib/team.mjs                      # installer core (config dir, model map, agent
 lib/picker.mjs                    # interactive model picker (`opencode models`)
 lib/runs.mjs                      # run inspection, DAG visualization, worktree pruning
 lib/doctor.mjs                    # environment diagnostic health checks
-bin/opencode-teamwork.mjs         # CLI: init / models / install / status / doctor / runs / inspect / prune
+lib/timeline.mjs                  # chronological run lifecycle builder & renderer
+bin/opencode-teamwork.mjs         # CLI: init / models / install / status / doctor / runs / inspect / timeline / prune
 scripts/lint-prompts.mjs          # prompt linter (run in CI)
 scripts/test-cost.mjs             # session tree consumption tests
 scripts/test-engine.mjs           # DAG engine, security gate & worktree tests
 scripts/test-doctor.mjs           # hermetic environment & CLI doctor tests
+scripts/test-timeline.mjs         # timeline hermetic unit tests
 postinstall.mjs                   # asks for models during npm install
 ```
 
@@ -113,12 +115,13 @@ npx opencode-teamwork-v2 status    # show what is installed and mapped
 npx opencode-teamwork-v2 doctor    # diagnose environment health (or --json)
 npx opencode-teamwork-v2 runs      # list active/past runs and spent budgets
 npx opencode-teamwork-v2 inspect   # inspect latest run DAG, tasks, and audit
+npx opencode-teamwork-v2 timeline  # chronological run timeline, task durations & cost
 npx opencode-teamwork-v2 prune     # prune completed git worktrees
 ```
 
 `opencode-teamwork` and `opencode-teamwork-v2` are aliases for the same CLI. If
 you are running from **inside this package's own checkout**, use the bundled
-scripts (`npm run init`, `npm run models`, `npm run status`, `npm run doctor`, `npm run runs`, `npm run inspect`, `npm run prune`) — `npx <name>` there
+scripts (`npm run init`, `npm run models`, `npm run status`, `npm run doctor`, `npm run timeline`, `npm run runs`, `npm run inspect`, `npm run prune`) — `npx <name>` there
 resolves the local package rather than the registry copy.
 
 Agent prompt files are left untouched by default. To also adopt updated prompt
