@@ -381,8 +381,23 @@ try {
     }
   }
 
-  // Seed the session_v2 table that tools.ts reads through node:sqlite (falls
-  // back to the sqlite3 CLI when node:sqlite is unavailable).
+  // Probe ONCE which SQLite backend can seed the session_v2 fixture table:
+  // node:sqlite (preferred) or the sqlite3 CLI. Returns null when neither exists.
+  async function probeSqliteBackend() {
+    try {
+      const mod = await import("node:sqlite")
+      if (typeof mod.DatabaseSync === "function") return "node:sqlite"
+    } catch {}
+    try {
+      execFileSync("sqlite3", ["--version"], { stdio: ["pipe", "pipe", "pipe"] })
+      return "sqlite3"
+    } catch {}
+    return null
+  }
+  const sqliteBackend = await probeSqliteBackend()
+
+  // Seed the session_v2 table that tools.ts reads. Errors propagate: a seeding
+  // failure with a backend present is a real test failure, never a skip.
   async function seedSessionDb(dbPath, rows) {
     mkdirSync(dirname(dbPath), { recursive: true })
     const ddl = `DROP TABLE IF EXISTS session_v2;
@@ -393,16 +408,15 @@ try {
       (r) =>
         `INSERT INTO session_v2 VALUES ('${r.id}', ${r.parent ? `'${r.parent}'` : "NULL"}, ${r.agent ? `'${r.agent}'` : "NULL"}, ${r.cost}, ${r.t.input}, ${r.t.output}, ${r.t.reasoning}, ${r.t.read}, ${r.t.write});`,
     )
-    let db
-    try {
+    if (sqliteBackend === "node:sqlite") {
       const { DatabaseSync } = await import("node:sqlite")
-      db = new DatabaseSync(dbPath)
-      db.exec(ddl + values.join("\n"))
-      db.close()
-    } catch (err) {
+      const db = new DatabaseSync(dbPath)
       try {
-        db?.close()
-      } catch {}
+        db.exec(ddl + values.join("\n"))
+      } finally {
+        db.close()
+      }
+    } else {
       execFileSync("sqlite3", [dbPath], { input: ddl + values.join("\n"), stdio: ["pipe", "pipe", "pipe"] })
     }
   }
@@ -454,6 +468,11 @@ try {
   const RUN_D = "20261018-000000-attr4"
 
   await withIsolatedOpencodeEnv(async ({ dbPath }) => {
+    if (sqliteBackend === null) {
+      console.log("⊘ skipped attribution DB tests: no node:sqlite and no sqlite3 CLI")
+      return
+    }
+
     // --- 6a: non-root spend WITH a taskId buckets to the task, not to the agent.
     {
       const f = await attrFixture(RUN_A)
@@ -480,22 +499,37 @@ try {
       console.log("✓ without taskId, non-root spend still buckets by agent name (legacy regression guard)")
     }
 
-    // --- 6c: byTaskTokens accumulates the token DELTA with the exact shape and values.
+    // --- 6c: byTaskTokens SUMS per-session token deltas across the whole tree.
+    // Two child sessions and a non-zero root all map to the same taskId, so the
+    // expected bucket is the sum of every contribution. A last-writer-wins
+    // (absolute) write would leave only one session's total and fail here.
     {
       const f = await attrFixture(RUN_C)
-      await seedSessionDb(dbPath, [rootRow, workerRow(0.3, T1)])
+      const ROOT_T1 = { input: 400, output: 80, reasoning: 4, read: 20, write: 2 }
+      const CHILD2 = "ses_attr_worker2"
+      const child2Row = (cost, t) => ({ id: CHILD2, parent: ROOT_SES, agent: "team/worker", cost, t })
+      const T2 = { input: 300, output: 60, reasoning: 3, read: 10, write: 1 }
+      // Call 1: root(R1) + child1(T1) + child2(T2) => sum of all three.
+      await seedSessionDb(dbPath, [{ ...rootRow, t: ROOT_T1 }, workerRow(0.3, T1), child2Row(0.2, T2)])
       await f.tools.cost.execute({ sessionId: RUN_C, taskId: "alpha" }, { sessionID: ROOT_SES })
-      // Second call: the worker has spent more. Only the delta may be added.
-      await seedSessionDb(dbPath, [rootRow, workerRow(0.45, { input: 1500, output: 300, reasoning: 10, read: 50, write: 5 })])
+      // Call 2: root grows by R2-R1, child1 grows by T1'-T1, child2 unchanged. Only deltas may be added.
+      const ROOT_T2 = { input: 500, output: 100, reasoning: 5, read: 30, write: 3 }
+      const CHILD1_T2 = { input: 1500, output: 300, reasoning: 10, read: 50, write: 5 }
+      await seedSessionDb(dbPath, [
+        { ...rootRow, t: ROOT_T2 },
+        workerRow(0.45, CHILD1_T2),
+        child2Row(0.2, T2),
+      ])
       await f.tools.cost.execute({ sessionId: RUN_C, taskId: "alpha" }, { sessionID: ROOT_SES })
       const costs = JSON.parse(readFileSync(runFile(f.root, RUN_C, "costs.json"), "utf8"))
-      assert.strictEqual(costs.byTask.alpha, 0.45, "cost must accumulate 0.3 + 0.15 delta")
+      assert.strictEqual(costs.byTask.alpha, 0.65, "cost must accumulate 0.3 + 0.2 + 0.15 delta")
+      // Expected = sum of all sessions' current totals: root(R2) + child1(T1') + child2(T2).
       assert.deepStrictEqual(costs.byTaskTokens.alpha, {
-        input: 1500,
-        output: 300,
-        reasoning: 10,
-        cache: { read: 50, write: 5 },
-      }, "byTaskTokens must accumulate the token delta exactly")
+        input: 500 + 1500 + 300,
+        output: 100 + 300 + 60,
+        reasoning: 5 + 10 + 3,
+        cache: { read: 30 + 50 + 10, write: 3 + 5 + 1 },
+      }, "byTaskTokens must SUM per-session token deltas across the tree")
       const bucket = costs.byTaskTokens.alpha
       assert.deepStrictEqual(Object.keys(bucket).sort(), ["cache", "input", "output", "reasoning"])
       assert.deepStrictEqual(Object.keys(bucket.cache).sort(), ["read", "write"])
@@ -503,7 +537,7 @@ try {
         assert(Number.isFinite(v) && Number.isInteger(v) && v >= 0, `token value must be a finite non-negative integer, got ${v}`)
       }
       assert.deepStrictEqual(Object.keys(costs.byTaskTokens).sort(), Object.keys(costs.byTask).sort(), "byTaskTokens keys must match byTask keys")
-      console.log("✓ byTaskTokens accumulates the exact token delta with the {input,output,reasoning,cache} shape")
+      console.log("✓ byTaskTokens sums per-session token deltas across the tree (absolute-write mutation is caught)")
     }
 
     // --- 6d: a pre-existing costs.json WITHOUT byTaskTokens is tolerated.
