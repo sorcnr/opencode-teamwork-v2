@@ -10,7 +10,7 @@
 // make the process exit non-zero.
 
 import { buildExportData, renderExport } from "../lib/export.mjs"
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, readdirSync, existsSync } from "node:fs"
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, readdirSync, existsSync, utimesSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, dirname } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -155,11 +155,9 @@ const REPORT_BETA = {
 }
 
 /**
- * Write a run directory under a fresh root and return the root.
- * Pass `null` for any file to omit it.
+ * Write a run directory under `root`. Pass `null` for any file to omit it.
  */
-function makeRun({ id = SESSION, events = EVENTS, state = STATE, plan = PLAN, costs = COSTS, security = SECURITY, reports = [REPORT_ALPHA, REPORT_BETA] } = {}) {
-  const root = makeRoot()
+function writeRun(root, { id = SESSION, events = EVENTS, state = STATE, plan = PLAN, costs = COSTS, security = SECURITY, reports = [REPORT_ALPHA, REPORT_BETA] } = {}) {
   const dir = runDirOf(root, id)
   mkdirSync(dir, { recursive: true })
   if (events !== null) writeFileSync(join(dir, "events.jsonl"), events.map((e) => JSON.stringify(e)).join("\n") + "\n")
@@ -168,6 +166,13 @@ function makeRun({ id = SESSION, events = EVENTS, state = STATE, plan = PLAN, co
   if (costs !== null) writeJson(join(dir, "costs.json"), costs)
   if (security !== null) writeJson(join(dir, "verify", "security-audit.json"), security)
   for (const report of reports) writeJson(join(dir, "verify", `report-${report.taskId}.json`), report)
+  return dir
+}
+
+/** Write a run directory under a fresh root and return the root. */
+function makeRun(opts) {
+  const root = makeRoot()
+  writeRun(root, opts)
   return root
 }
 
@@ -317,20 +322,34 @@ await check("CLI: `--markdown` selects Markdown output", () => {
 
 // `--session <id>` vs the positional id: without the alias, the flag is "unknown" and the id
 // only survives via the positional fallback, so the stderr assertion is what catches removal.
-await check("CLI: `--session <id>` selects the run (no unknown-argument warning)", () => {
-  const res = runCli(["export", "--session", SESSION, "-o", "-"], healthyRoot)
+// The root holds a second run that is the most recently modified, so the positional fallback
+// (runs[0]) would select OTHER. Only an honoured `--session SESSION` streams SESSION's document.
+await check("CLI: `--session <id>` selects the named run (no unknown-argument warning)", () => {
+  const twoRoot = makeRun()
+  const OTHER = "20261018-200000-ex02"
+  const otherDir = writeRun(twoRoot, { id: OTHER })
+  const sessionDir = runDirOf(twoRoot, SESSION)
+  const now = Date.now() / 1000
+  utimesSync(sessionDir, now - 120, now - 120)
+  utimesSync(otherDir, now, now)
+  const expected = renderExport(buildExportData(twoRoot, SESSION), { format: "html" })
+  assert.notStrictEqual(expected, renderExport(buildExportData(twoRoot, OTHER), { format: "html" }), "fixture runs must render differently")
+  const res = runCli(["export", "--session", SESSION, "-o", "-"], twoRoot)
   assert.strictEqual(res.status, 0, `--session must exit 0, got ${res.status}: ${res.stderr}`)
-  assert.strictEqual(res.stdout, renderExport(healthyData, { format: "html" }), "--session must stream the requested run's HTML")
+  assert.strictEqual(res.stdout, expected, "--session must stream the named run, not the most recent one")
   assert(!res.stderr.includes("unknown argument"), "--session must not be treated as an unknown argument")
 })
 
+// Uses its own pristine root: the alias checks above also invoke `-o -`, so a shared root
+// would already contain anything a broken `-o -` path leaked before this snapshot is taken.
 await check("CLI: `-o -` writes the document to stdout and creates no file", () => {
-  const before = readdirSync(healthyRoot).sort()
-  const res = runCli(["export", SESSION, "-o", "-"], healthyRoot)
+  const cleanRoot = makeRun()
+  const before = readdirSync(cleanRoot).sort()
+  const res = runCli(["export", SESSION, "-o", "-"], cleanRoot)
   assert.strictEqual(res.status, 0, `-o - must exit 0, got ${res.status}: ${res.stderr}`)
   assert.strictEqual(res.stdout, renderExport(healthyData, { format: "html" }), "stdout must be exactly the rendered document")
-  assert.deepStrictEqual(readdirSync(healthyRoot).sort(), before, "-o - must not create any file in the project root")
-  assert(!existsSync(join(runDirOf(healthyRoot, SESSION), "report.html")), "-o - must not write the default report.html either")
+  assert.deepStrictEqual(readdirSync(cleanRoot).sort(), before, "-o - must not create any file in the project root")
+  assert(!existsSync(join(runDirOf(cleanRoot, SESSION), "report.html")), "-o - must not write the default report.html either")
 })
 
 await check("CLI: `-o ../escape.html` is refused with exit 1 and nothing is written", () => {
