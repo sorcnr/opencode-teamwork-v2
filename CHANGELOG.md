@@ -4,6 +4,22 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.6] - 2026-10-18
+
+### Added
+
+- **`opencode-teamwork export <session-id>` command**:
+  - Offline, standalone HTML and GFM Markdown run reporting.
+  - Zero external dependencies or CDNs, self-contained embedded CSS with light/dark theme support (`prefers-color-scheme`).
+  - Supports `-o <path>` / `--output <path>` (with path containment and symlink traversal guards), `-m` / `--markdown`, and `-o -` stdout streaming.
+  - Comprehensive HTML entity escaping (`h()` / `md()`) protecting all dynamic fields against XSS.
+  - Wired `export` and `test:export` into `package.json` scripts and aggregate `npm test`.
+
+### Fixed
+
+- **HTML Report Table Layout**:
+  - Fixed table column collapse when expanding feedback & summary details by applying `white-space: nowrap` to metadata columns and responsive `min-width` on the task table.
+
 ## [0.5.5] - 2026-10-18
 
 ### Added
