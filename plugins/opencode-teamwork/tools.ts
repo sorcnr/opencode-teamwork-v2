@@ -567,6 +567,52 @@ function touch(file: string, content: string) {
   if (!existsSync(file)) writeFileSync(file, content)
 }
 
+/**
+ * Append one lifecycle event to `<run>/events.jsonl` (append-only, one JSON
+ * object per line). Fail-open: any error is swallowed so the DAG engine never
+ * depends on the event log. Every string field is sanitised with clean() so no
+ * value can inject a second physical line.
+ */
+async function appendEvent(
+  run: string,
+  ev: {
+    event: "run_created" | "task_transition" | "security_audit"
+    sessionId: string
+    taskId?: string | null
+    from?: string | null
+    to: string
+    round?: number
+    agent?: string | null
+    branch?: string | null
+    worktree?: string | null
+    phase?: string | null
+  },
+) {
+  try {
+    const eventsFile = join(run, "events.jsonl")
+    await withFileLock(eventsFile, () => {
+      refuseSymlink(eventsFile)
+      const opt = (v: unknown, max: number) => (v === null || v === undefined || v === "" ? null : clean(v, max))
+      const line = JSON.stringify({
+        ts: new Date().toISOString(),
+        event: ev.event,
+        sessionId: clean(ev.sessionId, 64),
+        taskId: opt(ev.taskId, 64),
+        from: opt(ev.from, 32),
+        to: clean(ev.to, 32),
+        round: Number(ev.round) || 0,
+        agent: opt(ev.agent, 64),
+        branch: opt(ev.branch, 120),
+        worktree: opt(ev.worktree, 200),
+        phase: opt(ev.phase, 32),
+      })
+      appendFileSync(eventsFile, line + "\n")
+    })
+  } catch {
+    // fail-open: an events.jsonl write failure must never alter tool results
+  }
+}
+
 // Serialise read-modify-write of a run's cost files within this process, so
 // concurrent agents (parallel workers calling teamwork_cost at once) cannot
 // clobber each other's attribution. Keyed by the file path; the whole async
@@ -735,6 +781,7 @@ export async function registerTeamworkTools(ctx: any, root: string) {
           writeSnapshots(join(run, "snapshots.json"), snaps)
         })
         touch(join(run, "pitfalls.md"), "# Pitfalls\n\n_answer-agnostic failure modes; one per line_\n")
+        await appendEvent(run, { event: "run_created", sessionId, taskId: null, from: null, to: "pending", round: 0, phase: "DAG_BUILD" })
         // Backstop: if console credits apply but the budget wasn't derived from
         // them, warn (advisory — the sentinel is instructed to run the preflight).
         let creditWarning = ""
@@ -1239,6 +1286,7 @@ export async function registerTeamworkTools(ctx: any, root: string) {
           }
 
           const current = state.tasks[taskId] || { status: "pending", round: 0 }
+          const fromStatus = typeof current.status === "string" ? current.status : "pending"
           const maxRounds = Number(def?.maxRounds) || 4
           let round = Number.isFinite(input.round) ? Number(input.round) : (Number(current.round) || 0)
 
@@ -1275,6 +1323,20 @@ export async function registerTeamworkTools(ctx: any, root: string) {
 
           state.updatedAt = new Date().toISOString()
           writeJson(stateFile, state)
+
+          // Log what actually landed in state.json (post-normalisation, post-coercion).
+          await appendEvent(run, {
+            event: "task_transition",
+            sessionId: basename(run),
+            taskId,
+            from: fromStatus,
+            to: status,
+            round,
+            agent: def?.agent ?? null,
+            branch: input.branch ?? current.branch ?? null,
+            worktree: input.worktree ?? current.worktree ?? null,
+            phase: state.phase ?? null,
+          })
 
           return {
             content: `Task ${taskId} updated: status=${status}, round=${round}${input.branch ? `, branch=${input.branch}` : ""}${status === "blocked" ? " (BLOCKED: max rounds reached)" : ""}`,
@@ -1366,6 +1428,13 @@ export async function registerTeamworkTools(ctx: any, root: string) {
           state.updatedAt = new Date().toISOString()
           writeJson(stateFile, state)
         }
+
+        await appendEvent(run, {
+          event: "security_audit",
+          sessionId: basename(run),
+          to: status,
+          phase: state?.phase ?? null,
+        })
 
         if (status === "FAIL") {
           return {
