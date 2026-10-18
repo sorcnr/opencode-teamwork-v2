@@ -3,7 +3,7 @@ description: "Generates a candidate solution for a Teamwork run. One proposer = 
 mode: subagent
 model: deepseek/deepseek-flash
 color: "#3b82f6"
-hidden: true
+hidden: false
 permissions:
   - action: edit
     resource: "*"

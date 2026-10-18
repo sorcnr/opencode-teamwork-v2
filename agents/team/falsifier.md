@@ -3,7 +3,7 @@ description: "Attacks a single candidate. Your job is to find flaws. If you cann
 mode: subagent
 model: deepseek/deepseek-v4-pro
 color: "#ef4444"
-hidden: true
+hidden: false
 permissions:
   - action: edit
     resource: "*"

@@ -3,7 +3,7 @@ description: "Read-only security auditor. Audits a repository (or a Teamwork run
 mode: subagent
 model: deepseek/deepseek-v4-pro
 color: "#dc2626"
-hidden: true
+hidden: false
 permissions:
   - action: edit
     resource: "*"

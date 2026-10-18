@@ -3,7 +3,7 @@ description: "Reads multiple candidates + their falsifier critiques and produces
 mode: subagent
 model: deepseek/deepseek-v4-pro
 color: "#10b981"
-hidden: true
+hidden: false
 permissions:
   - action: edit
     resource: "*"

@@ -3,7 +3,7 @@ description: "Worker specialized for math and formal proofs. Same lifecycle as W
 mode: subagent
 model: deepseek/deepseek-v4-pro
 color: "#0ea5e9"
-hidden: true
+hidden: false
 permissions:
   - action: edit
     resource: "*"

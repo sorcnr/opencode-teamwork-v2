@@ -4,6 +4,24 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.3] - 2026-10-18
+
+### Added
+
+- **`opencode-teamwork doctor` diagnostic command**:
+  - Standalone, zero-dependency diagnostic runner in `lib/doctor.mjs` checking 7 environmental invariants: config file presence/validity, plugin registration, 11 installed agents, model map synchronization, git binary, git work tree presence, and worktree directory access.
+  - Pretty-printed human readable terminal output with `[✓]`, `[!]`, and `[✗]` status indicators.
+  - Added `--json` flag to `opencode-teamwork doctor` for machine-readable diagnostics.
+  - Added hermetic automated test suite in `scripts/test-doctor.mjs` wired into `npm test`.
+
+### Fixed
+
+- **Subagent Model & Dispatch Visibility in OpenCode V2**:
+  - Subagents previously had `hidden: true` in their frontmatter, causing OpenCode V2 to filter them out of the `subagent` tool schema presented to LLMs. Switched to `hidden: false` on all 8 subagents (`worker`, `verifier`, `security-auditor`, `scout`, `synthesizer`, `proof-worker`, `falsifier`, `proposer`) so OpenCode natively exposes them in the `subagent` tool schema.
+  - Updated `sentinel.md` with explicit dispatch rules mandating `agent: "team/*"` (e.g. `team/worker`, `team/verifier`) and strictly forbidding fallback to `general`. This ensures subagents execute with their allocated model (e.g. Claude Haiku / DeepSeek) and dedicated permissions.
+- **Model Map Priority Inversion in `lib/team.mjs`**:
+  - Fixed `currentModels()` so user configuration in `teamwork.json` takes precedence over installed agent markdown files. Manual edits in `teamwork.json` are now reliably preserved and applied across `install` and `status` runs without dual-list warnings.
+
 ## [0.5.2] - 2026-10-18
 
 ### Added

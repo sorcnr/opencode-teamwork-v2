@@ -1,6 +1,6 @@
 {
   "name": "opencode-teamwork-v2",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "description": "Antigravity-style multi-agent orchestration for OpenCode V2 — 11 agents, 7 commands, interactive model assignment on install.",
   "keywords": [
     "opencode",
@@ -51,6 +51,7 @@
     "init": "node ./bin/opencode-teamwork.mjs init",
     "models": "node ./bin/opencode-teamwork.mjs models",
     "status": "node ./bin/opencode-teamwork.mjs status",
+    "doctor": "node ./bin/opencode-teamwork.mjs doctor",
     "runs": "node ./bin/opencode-teamwork.mjs runs",
     "inspect": "node ./bin/opencode-teamwork.mjs inspect",
     "prune": "node ./bin/opencode-teamwork.mjs prune"

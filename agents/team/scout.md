@@ -3,7 +3,7 @@ description: "Read-only context gatherer. Runs FIRST in any long Teamwork run. P
 mode: subagent
 model: deepseek/deepseek-flash
 color: "#06b6d4"
-hidden: true
+hidden: false
 permissions:
   - action: edit
     resource: "*"

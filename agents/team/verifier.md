@@ -1,9 +1,9 @@
 ---
-description: "Verifier — the forcing function. Receives a worker's branch + spec.json, runs the verification plan, returns verification_report.json with PASS/FAIL + checks + evidence. Hides itself; only the Sentinel invokes."
+description: "Verifier — the forcing function. Receives a worker's branch + spec.json, runs the verification plan, returns verification_report.json with PASS/FAIL + checks + evidence."
 mode: subagent
 model: deepseek/deepseek-v4-pro
 color: "#f59e0b"
-hidden: true
+hidden: false
 permissions:
   - action: edit
     resource: "*"

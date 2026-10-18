@@ -62,13 +62,13 @@ problem yourself. You:
      - Provision worker worktree: `teamwork_worktree({ action: "setup", role: "worker", taskId })`
      - Mark task active: `teamwork_task_update({ taskId, status: "worker_active" })`
      - Generate worker `spec.json` (schema in `ARTIFACTS.md`) pointing to the provisioned worktree and `baseBranch`
-     - Dispatch worker subagent (e.g. `team/worker`).
+     - Dispatch worker subagent by explicitly setting `agent: "team/worker"` (or `"team/proof-worker"` for formal proofs) in the `subagent` tool. **NEVER pass `agent: "general"`** — OpenCode only loads the worker's dedicated model, prompt, and permissions when the explicit `team/*` agent ID is passed.
    - The worker commits its changes to `teamwork/$SESSION_ID-<taskId>`.
    - On completion, record output: `teamwork_task_update({ taskId, status: "worker_done", branch })`.
 7. **Adversarial verification.** For each task in `readyForVerifier` returned by `teamwork_next`:
    - Mark verifier active: `teamwork_task_update({ taskId, status: "verifier_active" })`
    - Inspect branch diff via `teamwork_worktree({ action: "diff", taskId })` (or `git diff "teamwork/base-$SESSION_ID..teamwork/$SESSION_ID-<taskId>"`)
-   - Dispatch `team/verifier` subagent against worker branch in read-only mode.
+   - Dispatch verifier subagent with `agent: "team/verifier"` in read-only mode (never `"general"`).
    - The verifier produces `verify/report-<task>.json`.
    - Update task status with verification results:
      `teamwork_task_update({ taskId, status: "verified_pass" | "verified_fail", verification: { status, passedChecks, totalChecks, fatalFindings }, feedback })`.
@@ -77,13 +77,13 @@ problem yourself. You:
    - If verification fails (`verified_fail`): log pitfall via `teamwork_pitfall`, pass feedback to the next round, and call `teamwork_next` to re-enqueue.
    - If a task exceeds `maxRounds`, `teamwork_task_update` automatically marks it `blocked`.
    - On `verified_pass`: merge worker branch into sentinel base branch via `teamwork_worktree({ action: "merge", taskId })`.
-     If merge conflict occurs, the tool generates `.opencode/teamwork/$SESSION_ID/synthesis/conflict-<taskId>.json`. Dispatch `team/synthesizer` to resolve the conflict, write resolved files to the sentinel worktree, and commit via `teamwork_worktree({ action: "resolve", taskId })`.
+     If merge conflict occurs, the tool generates `.opencode/teamwork/$SESSION_ID/synthesis/conflict-<taskId>.json`. Dispatch synthesizer with `agent: "team/synthesizer"` to resolve the conflict, write resolved files to the sentinel worktree, and commit via `teamwork_worktree({ action: "resolve", taskId })`.
    - Check budget with `teamwork_cost` each round. Halt non-essential workers if nearing budget.
 9. **Checkpoint every state transition.** Keep `state.json` current (the
    engine tools do this); after a restart call `teamwork_resume` to pick up
    the open tasks. Allows resume after token limits or interruption.
 10. **Pre-Merge Security Audit (Mandatory Gate).** When all tasks have passed functional verification and merged into the base branch, call `teamwork_next`. It will return `READY_FOR_SECURITY_AUDIT`:
-    - Spawn `team/security-auditor` on the sentinel base worktree (`teamwork/base-$SESSION_ID`).
+    - Spawn security auditor with `agent: "team/security-auditor"` on the sentinel base worktree (`teamwork/base-$SESSION_ID`).
     - The security auditor audits the combined diff for secrets, command injections, path traversals, and guardrail gaps.
     - Record findings via `teamwork_security_audit({ status: "PASS" | "FAIL", findings, summary })`.
     - If `FAIL` (Critical/High findings), `teamwork_next` blocks final merge (`BLOCKED_BY_SECURITY`). Remediate findings before proceeding.
@@ -93,7 +93,7 @@ problem yourself. You:
     - Clean up worktrees via `teamwork_worktree({ action: "cleanup" })`.
     - On partial success or deadlock, present the partial result and open verification reports.
 12. **Final verification (after completion).** Once the run completes — full
-    or partial — spawn a dedicated `team/verifier` agent to independently
+    or partial — spawn a dedicated verifier with `agent: "team/verifier"` to independently
     verify the final merged result against the spec's acceptance criteria.
     Write its report to `.opencode/teamwork/$SESSION_ID/verify/final.json`
     and surface PASS/FAIL in `final.md`.

@@ -37,10 +37,12 @@ docs/ARTIFACTS.md                 # canonical artifact layout, topologies, schem
 lib/team.mjs                      # installer core (config dir, model map, agent files)
 lib/picker.mjs                    # interactive model picker (`opencode models`)
 lib/runs.mjs                      # run inspection, DAG visualization, worktree pruning
-bin/opencode-teamwork.mjs         # CLI: init / models / install / status / runs / inspect / prune
+lib/doctor.mjs                    # environment diagnostic health checks
+bin/opencode-teamwork.mjs         # CLI: init / models / install / status / doctor / runs / inspect / prune
 scripts/lint-prompts.mjs          # prompt linter (run in CI)
 scripts/test-cost.mjs             # session tree consumption tests
 scripts/test-engine.mjs           # DAG engine, security gate & worktree tests
+scripts/test-doctor.mjs           # hermetic environment & CLI doctor tests
 postinstall.mjs                   # asks for models during npm install
 ```
 
@@ -108,6 +110,7 @@ opencode plugin add opencode-teamwork-v2
 npx opencode-teamwork-v2 init      # pick models, install agents, register plugin
 npx opencode-teamwork-v2 models    # pick models only (never edits opencode.json)
 npx opencode-teamwork-v2 status    # show what is installed and mapped
+npx opencode-teamwork-v2 doctor    # diagnose environment health (or --json)
 npx opencode-teamwork-v2 runs      # list active/past runs and spent budgets
 npx opencode-teamwork-v2 inspect   # inspect latest run DAG, tasks, and audit
 npx opencode-teamwork-v2 prune     # prune completed git worktrees
@@ -115,7 +118,7 @@ npx opencode-teamwork-v2 prune     # prune completed git worktrees
 
 `opencode-teamwork` and `opencode-teamwork-v2` are aliases for the same CLI. If
 you are running from **inside this package's own checkout**, use the bundled
-scripts (`npm run init`, `npm run models`, `npm run status`, `npm run runs`, `npm run inspect`, `npm run prune`) — `npx <name>` there
+scripts (`npm run init`, `npm run models`, `npm run status`, `npm run doctor`, `npm run runs`, `npm run inspect`, `npm run prune`) — `npx <name>` there
 resolves the local package rather than the registry copy.
 
 Agent prompt files are left untouched by default. To also adopt updated prompt

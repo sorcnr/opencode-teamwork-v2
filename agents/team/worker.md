@@ -1,9 +1,9 @@
 ---
-description: "Worker — specialized implementation agent. Receives a scoped spec.json + its own git worktree, edits and commits there, returns summary.md. Hides itself in the agent menu; only the Sentinel invokes."
+description: "Worker — specialized implementation agent. Receives a scoped spec.json + its own git worktree, edits and commits there, returns summary.md."
 mode: subagent
 model: deepseek/deepseek-flash
 color: "#3b82f6"
-hidden: true
+hidden: false
 permissions:
   - action: edit
     resource: "*"
