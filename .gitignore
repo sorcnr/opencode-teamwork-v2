@@ -8,3 +8,5 @@ dist/
 
 # installer backups
 .opencode-teamwork-backup/
+# teamwork backup files
+.opencode/
