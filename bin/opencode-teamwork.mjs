@@ -26,7 +26,14 @@ import {
 import { detectAvailableModels, pickModels, applyOverrides } from "../lib/picker.mjs"
 import { listTeamworkRuns, inspectTeamworkRun, pruneTeamworkWorktrees } from "../lib/runs.mjs"
 import { runDoctor } from "../lib/doctor.mjs"
-import { buildTimeline, renderTimeline } from "../lib/timeline.mjs"
+import { buildTimeline, renderTimeline, timelineWarnings } from "../lib/timeline.mjs"
+
+// Echo a user-supplied value in an error message: control characters become "?"
+// and the value is capped, so a hostile argv cannot inject escapes or bloat stderr.
+function safeEcho(value, max = 64) {
+  const shown = String(value ?? "").replace(/[\x00-\x1f\x7f-\x9f]/g, "?")
+  return shown.length > max ? `${shown.slice(0, max)}...` : shown
+}
 
 const HELP = `opencode-teamwork-v2
 
@@ -277,14 +284,21 @@ function timelineCommand(options) {
   }
   const target = options.session ? runs.find((r) => r.sessionId === options.session) : runs[0]
   if (!target) {
-    console.error(`Run "${options.session}" not found.`)
+    console.error(`Run "${safeEcho(options.session)}" not found.`)
     process.exitCode = 1
     return
   }
 
   const timeline = buildTimeline(process.cwd(), target.sessionId)
   if (options.json) {
-    console.log(JSON.stringify(timeline, null, 2))
+    // JSON.stringify escapes C0 only; escape DEL and C1 (incl. 0x9b CSI) too so
+    // no raw control byte from a run file can reach the terminal.
+    const json = JSON.stringify(timeline, null, 2).replace(
+      /[\x7f-\x9f]/g,
+      (c) => "\\u" + c.charCodeAt(0).toString(16).padStart(4, "0"),
+    )
+    console.log(json)
+    for (const warning of timelineWarnings(timeline)) console.error(`warning: ${warning}`)
     return
   }
 
