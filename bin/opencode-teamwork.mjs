@@ -26,6 +26,7 @@ import {
 import { detectAvailableModels, pickModels, applyOverrides } from "../lib/picker.mjs"
 import { listTeamworkRuns, inspectTeamworkRun, pruneTeamworkWorktrees } from "../lib/runs.mjs"
 import { runDoctor } from "../lib/doctor.mjs"
+import { buildTimeline, renderTimeline } from "../lib/timeline.mjs"
 
 const HELP = `opencode-teamwork-v2
 
@@ -38,6 +39,7 @@ Commands:
   status     Show config dir, model map, installed agents and plugin state
   runs       List active and past Teamwork runs in .opencode/teamwork/
   inspect    Inspect DAG, task progress, security report and costs for a run
+  timeline   Show per-task lifecycle timing, rounds, and cost for a run (--json for raw data)
   prune      Prune git worktrees for completed Teamwork runs
   doctor     Diagnose config, agents, model sync and git/worktree health
   help       Show this help
@@ -47,7 +49,8 @@ Options:
       --all <model>      Use one model for every agent (e.g. anthropic/claude-sonnet-4-5)
       --model <id>=<m>   Override one agent (repeatable), id may omit the "team/" prefix
       --session <id>     Target a specific session ID (for inspect or prune)
-      --json             Print doctor output as raw JSON (for doctor)
+      --json             Print doctor or timeline output as raw JSON
+      --no-color         Disable ANSI colours (for timeline)
       --no-register      Don't touch opencode.json(c)
       --refresh          Overwrite agent prompt bodies with the shipped versions
                          (keeps your model choices; backs up the old files)
@@ -57,7 +60,7 @@ Options:
 `
 
 function parseArgs(argv) {
-  const options = { command: undefined, yes: false, all: undefined, assignments: {}, register: true, dryRun: false, refresh: false, configDir: undefined, session: undefined, json: false, help: false }
+  const options = { command: undefined, yes: false, all: undefined, assignments: {}, register: true, dryRun: false, refresh: false, configDir: undefined, session: undefined, json: false, noColor: false, help: false }
   const rest = [...argv]
   options.command = rest.shift()
   while (rest.length) {
@@ -95,12 +98,15 @@ function parseArgs(argv) {
       case "--json":
         options.json = true
         break
+      case "--no-color":
+        options.noColor = true
+        break
       case "-h":
       case "--help":
         options.help = true
         break
       default:
-        if (arg && !options.session && (options.command === "inspect" || options.command === "prune") && !arg.startsWith("-")) {
+        if (arg && !options.session && (options.command === "inspect" || options.command === "prune" || options.command === "timeline") && !arg.startsWith("-")) {
           options.session = arg
         } else if (arg) {
           console.warn(`Ignoring unknown argument: ${arg}`)
@@ -262,6 +268,30 @@ function inspectCommand(options) {
   }
 }
 
+function timelineCommand(options) {
+  const runs = listTeamworkRuns(process.cwd())
+  if (!runs.length) {
+    console.error("No Teamwork runs found.")
+    process.exitCode = 1
+    return
+  }
+  const target = options.session ? runs.find((r) => r.sessionId === options.session) : runs[0]
+  if (!target) {
+    console.error(`Run "${options.session}" not found.`)
+    process.exitCode = 1
+    return
+  }
+
+  const timeline = buildTimeline(process.cwd(), target.sessionId)
+  if (options.json) {
+    console.log(JSON.stringify(timeline, null, 2))
+    return
+  }
+
+  const color = Boolean(process.stdout.isTTY) && !process.env.NO_COLOR && !options.noColor
+  for (const line of renderTimeline(timeline, { color })) console.log(line)
+}
+
 function pruneCommand(options) {
   const res = pruneTeamworkWorktrees(process.cwd(), {
     all: Boolean(options.all),
@@ -312,7 +342,7 @@ async function main() {
     console.log(HELP)
     return
   }
-  if (!["init", "models", "install", "status", "runs", "inspect", "prune", "doctor"].includes(command)) {
+  if (!["init", "models", "install", "status", "runs", "inspect", "timeline", "prune", "doctor"].includes(command)) {
     console.error(`Unknown command: ${command}\n`)
     console.log(HELP)
     process.exitCode = 1
@@ -322,6 +352,7 @@ async function main() {
   if (command === "status") return status(options)
   if (command === "runs") return runsCommand()
   if (command === "inspect") return inspectCommand(options)
+  if (command === "timeline") return timelineCommand(options)
   if (command === "prune") return pruneCommand(options)
   if (command === "doctor") return doctorCommand(options)
   if (command === "install") {
