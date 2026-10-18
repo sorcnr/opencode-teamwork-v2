@@ -432,9 +432,19 @@ suitable for pasting into a PR description or an issue comment.
 | Other cost buckets | cost buckets that are not task ids (HTML only, when present) |
 | Warnings | files that were oversize, unreadable, or malformed and were skipped |
 
-The overall status is `PASS` only when every task is `verified_pass` and the audit
-did not fail. It is `FAIL` when any task is `verified_fail` or `blocked`, or when
-the audit fails. Otherwise it is `INCOMPLETE`. Missing `events.jsonl` data is shown
+The overall status is decided from three inputs: the tasks, the security audit, and
+`verify/final.json`. It is checked in this order:
+
+1. `FAIL` when any task is `verified_fail` or `blocked`, when the security audit
+   reports `FAIL` or has any `critical` or `high` finding, or when
+   `verify/final.json` reports `FAIL`.
+2. `PASS` when `verify/final.json` reports `PASS` (even if some tasks are not yet
+   `verified_pass`).
+3. `PASS` when there is at least one task, every task is `verified_pass`, and the
+   audit did not fail.
+4. Otherwise `INCOMPLETE`.
+
+Missing `events.jsonl` data is shown
 as "timing unknown" rather than guessed.
 
 **Errors.** A missing or invalid run (no run directory, or no valid
