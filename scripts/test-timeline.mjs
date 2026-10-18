@@ -673,22 +673,29 @@ await check("R6.6 (2r): a dangling symlinked events.jsonl is not read by buildTi
   assert(timelineWarnings(t).some((w) => w.startsWith("events.jsonl is not a regular file")), `warning missing: ${timelineWarnings(t)}`)
 })
 
-await check("R6.6 (3r): a symlinked .opencode/teamwork run root is refused by buildTimeline", () => {
-  const outside = uniq("outside-runs")
-  const outDir = join(outside, SESSION)
-  mkdirSync(outDir, { recursive: true })
-  writeJson(join(outDir, "state.json"), STATE)
-  writeJson(join(outDir, "plan.dag.json"), PLAN)
-  const root = makeRoot()
-  mkdirSync(join(root, ".opencode"), { recursive: true })
-  symlinkSync(outside, join(root, ".opencode", "teamwork"))
-  const t = buildTimeline(root, SESSION)
-  assertShape(t)
-  assert.deepStrictEqual(t.tasks, [], "nothing may be read through a symlinked run root")
-  assert.strictEqual(t.phase, "UNKNOWN")
-  assert(timelineWarnings(t).some((w) => w.includes("symlink")), `warning missing: ${timelineWarnings(t)}`)
-  assert.deepStrictEqual(buildTimeline(root).tasks, [], "default run lookup must not list through the symlink either")
-})
+for (const where of ["outside", "inside"]) {
+  await check(`R6.6 (3r): a symlinked .opencode/teamwork run root (target ${where} the project) is refused by buildTimeline`, () => {
+    const root = makeRoot()
+    // "outside" points at a sibling tree; "inside" points at a directory within the project.
+    const target = where === "outside" ? uniq("outside-runs") : join(root, "elsewhere")
+    const outDir = join(target, SESSION)
+    mkdirSync(outDir, { recursive: true })
+    writeJson(join(outDir, "state.json"), STATE)
+    writeJson(join(outDir, "plan.dag.json"), PLAN)
+    writeFileSync(join(outDir, "events.jsonl"), EVENTS.map((e) => JSON.stringify(e)).join("\n") + "\n")
+    mkdirSync(join(root, ".opencode"), { recursive: true })
+    symlinkSync(target, join(root, ".opencode", "teamwork"))
+    const t = buildTimeline(root, SESSION)
+    assertShape(t)
+    assert.deepStrictEqual(t.tasks, [], "nothing may be read through a symlinked run root")
+    assert.strictEqual(t.mode, "derived")
+    assert.strictEqual(t.phase, "UNKNOWN")
+    assert(timelineWarnings(t).some((w) => w.includes("symlink")), `warning missing: ${timelineWarnings(t)}`)
+    const byDefault = buildTimeline(root)
+    assert.strictEqual(byDefault.sessionId, null, "the default run lookup must not list runs through the symlink")
+    assert.deepStrictEqual(byDefault.tasks, [])
+  })
+}
 
 await check("R6.6 (5): hostile task ids cannot read a report outside their own slot", () => {
   const hostile = ["..", "../../x", "a/b", "/abs/x", "a\u0000b", "x".repeat(65)]
@@ -819,21 +826,23 @@ await check("R6.6 (2): a DANGLING symlinked events.jsonl is refused; no target i
   assert(!existsSync(target), "appending through a dangling symlink would create the target; it must not")
 })
 
-await check("R6.6 (3e): a symlinked .opencode/teamwork run root is refused by the engine", async () => {
-  const outsideRuns = uniq("outside-engine-runs")
-  const outDir = join(outsideRuns, SESSION)
-  mkdirSync(outDir, { recursive: true })
-  writeJson(join(outDir, "state.json"), { sessionId: SESSION, phase: "DISPATCH", tasks: { alpha: { status: "pending", round: 0 } } })
-  writeJson(join(outDir, "plan.dag.json"), { sessionId: SESSION, tasks: [{ id: "alpha", dependsOn: [], maxRounds: 4 }] })
-  const root = makeRoot()
-  mkdirSync(join(root, ".opencode"), { recursive: true })
-  symlinkSync(outsideRuns, join(root, ".opencode", "teamwork"))
-  const tools = await engineTools(root)
-  const res = await tools.task_update.execute({ sessionId: SESSION, taskId: "alpha", status: "worker_active" })
-  assert(/refused/.test(res.content), `must be refused, got: ${res.content}`)
-  assert.strictEqual(JSON.parse(readFileSync(join(outDir, "state.json"), "utf8")).tasks.alpha.status, "pending", "nothing may be written through the link")
-  assert(!existsSync(join(outDir, "events.jsonl")), "no event may be written through the link")
-})
+for (const where of ["outside", "inside"]) {
+  await check(`R6.6 (3e): a symlinked .opencode/teamwork run root (target ${where} the project) is refused by the engine`, async () => {
+    const root = makeRoot()
+    const target = where === "outside" ? uniq("outside-engine-runs") : join(root, "elsewhere")
+    const outDir = join(target, SESSION)
+    mkdirSync(outDir, { recursive: true })
+    writeJson(join(outDir, "state.json"), { sessionId: SESSION, phase: "DISPATCH", tasks: { alpha: { status: "pending", round: 0 } } })
+    writeJson(join(outDir, "plan.dag.json"), { sessionId: SESSION, tasks: [{ id: "alpha", dependsOn: [], maxRounds: 4 }] })
+    mkdirSync(join(root, ".opencode"), { recursive: true })
+    symlinkSync(target, join(root, ".opencode", "teamwork"))
+    const tools = await engineTools(root)
+    const res = await tools.task_update.execute({ sessionId: SESSION, taskId: "alpha", status: "worker_active" })
+    assert(/refused/.test(res.content), `must be refused, got: ${res.content}`)
+    assert.strictEqual(JSON.parse(readFileSync(join(outDir, "state.json"), "utf8")).tasks.alpha.status, "pending", "nothing may be written through the link")
+    assert(!existsSync(join(outDir, "events.jsonl")), "no event may be written through the link")
+  })
+}
 
 await check("R6.6 (4): control chars and newlines in every appended field cannot inject a second JSONL line", async () => {
   const { root, dir } = engineRun()
@@ -895,7 +904,7 @@ await check("R6.6 (7): a '..' task id is REFUSED by worktree setup and deletes n
     const ok = await tools.worktree.execute({ sessionId: SESSION, action: "setup", role: "worker", taskId: "alpha" })
     assert(ok.content.includes("worker worktree ready"), `control setup must succeed, got: ${ok.content}`)
 
-    for (const bad of ["..", "../../" + basenameOf(sibling)]) {
+    for (const bad of ["..", "../../" + basenameOf(sibling), "a/b", "/abs/x", "x".repeat(65)]) {
       const res = await tools.worktree.execute({ sessionId: SESSION, action: "setup", role: "worker", taskId: bad })
       assert(/refused/.test(res.content), `task id ${JSON.stringify(bad)} must be refused, got: ${res.content}`)
     }
