@@ -359,6 +359,60 @@ await check("CLI: `-o ../escape.html` is refused with exit 1 and nothing is writ
   assert(!existsSync(join(testDir, "escape.html")), "nothing may be written outside the project root")
 })
 
+// ==========================================
+// 6. package.json wiring (R2 `export` script, R4 aggregate `test`)
+// ==========================================
+
+// Read package.json with node:fs. Never shell out to npm: these checks must not depend on
+// npm's behaviour, and they read only the repo's own manifest.
+const packageJsonPath = join(here, "..", "package.json")
+
+function readPackageScripts() {
+  const pkg = JSON.parse(readFileSync(packageJsonPath, "utf8"))
+  assert(pkg && typeof pkg.scripts === "object" && pkg.scripts !== null, "package.json must have a scripts object")
+  return pkg.scripts
+}
+
+// Split an aggregate script such as "npm run a && npm run b" into its step names, in order.
+function aggregateSteps(script) {
+  return script.split("&&").map((step) => {
+    const m = /^\s*npm run (\S+)\s*$/.exec(step)
+    return m ? m[1] : step.trim()
+  })
+}
+
+const PRE_EXISTING_SUITES = ["lint:prompts", "test:cost", "test:engine", "test:doctor", "test:timeline"]
+
+await check("package.json: `export` script exists and is a non-empty command", () => {
+  const scripts = readPackageScripts()
+  assert.strictEqual(typeof scripts.export, "string", "scripts.export must be a command string (npm run export)")
+  assert(scripts.export.trim().length > 0, "scripts.export must not be empty")
+})
+
+await check("package.json: `export` script invokes bin/opencode-teamwork.mjs with the export subcommand", () => {
+  const command = readPackageScripts().export
+  const tokens = command.trim().split(/\s+/)
+  const i = tokens.findIndex((t) => t === "./bin/opencode-teamwork.mjs" || t === "bin/opencode-teamwork.mjs")
+  assert(i !== -1, `scripts.export must invoke bin/opencode-teamwork.mjs, got: ${JSON.stringify(command)}`)
+  assert.strictEqual(tokens[i + 1], "export", `the token after the CLI path must be "export", got: ${JSON.stringify(command)}`)
+})
+
+await check("package.json: aggregate `test` script includes test:export", () => {
+  const steps = aggregateSteps(readPackageScripts().test)
+  assert(steps.includes("test:export"), `scripts.test must run test:export, got steps: ${steps.join(", ")}`)
+})
+
+await check("package.json: aggregate `test` script still runs the five pre-existing suites in order, then test:export", () => {
+  const steps = aggregateSteps(readPackageScripts().test)
+  let at = -1
+  for (const suite of [...PRE_EXISTING_SUITES, "test:export"]) {
+    const idx = steps.indexOf(suite)
+    assert(idx !== -1, `scripts.test must still run ${suite} (steps: ${steps.join(", ")})`)
+    assert(idx > at, `${suite} must run after the previous suite (steps: ${steps.join(", ")})`)
+    at = idx
+  }
+})
+
 // ---------------------------------------------------------------- cleanup
 
 rmSync(testDir, { recursive: true, force: true })
