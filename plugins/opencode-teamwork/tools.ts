@@ -342,6 +342,87 @@ async function readSessionUsage(
   }
 }
 
+/** Reject if `p` does not settle within `ms`; the timer is always cleared. */
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const guard = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error("timeout")), ms)
+  })
+  return Promise.race([p, guard]).finally(() => clearTimeout(timer))
+}
+
+/**
+ * Best-effort actor lookup for the calling session. Fail-open: never throws and
+ * never blocks longer than 2s. Order: the client's session.get agent, then the
+ * agent recorded for that session in snapshots.json (same source as
+ * bySession[*].agent). Returns undefined when neither is available.
+ */
+async function deriveCallerAgent(ctx: any, run: string, sessionID: string | undefined): Promise<string | undefined> {
+  if (!sessionID) return undefined
+  try {
+    if (typeof ctx?.session?.get === "function") {
+      const info: any = await withTimeout(Promise.resolve(ctx.session.get({ sessionID })), 2000)
+      const a = typeof info?.agent === "string" ? clean(info.agent, 64).trim() : ""
+      if (a) return a
+    }
+  } catch {}
+  try {
+    const a = readSnapshots(join(run, "snapshots.json"))?.bySession?.[sessionID]?.agent
+    if (typeof a === "string") {
+      const c = clean(a, 64).trim()
+      if (c) return c
+    }
+  } catch {}
+  return undefined
+}
+
+type TokenTotals = { input: number; output: number; reasoning: number; cache: { read: number; write: number } }
+
+/** Non-negative integer, 0 for anything non-finite. */
+function tokenInt(v: unknown): number {
+  const n = Math.round(Number(v))
+  return Number.isFinite(n) && n > 0 ? n : 0
+}
+
+/**
+ * Add the token delta (cur - prev.lastTokens) of one session to
+ * costs.byTaskTokens[bucket]. Mirrors the cost-delta baseline: no prior snapshot
+ * means the full current total is the delta. A prior snapshot without
+ * lastTokens cannot yield an honest delta, so it is skipped. Keys are mirrored
+ * into byTask (value 0 if absent) so the two maps stay in lockstep.
+ */
+function accumulateTokenDelta(costs: any, bucket: string, cur: TokenTotals | undefined, prev: any) {
+  if (!cur || typeof cur !== "object") return
+  if (prev && !prev.lastTokens) return
+  const base: any = prev ? prev.lastTokens : undefined
+  const d = {
+    input: tokenInt(cur.input) - tokenInt(base?.input),
+    output: tokenInt(cur.output) - tokenInt(base?.output),
+    reasoning: tokenInt(cur.reasoning) - tokenInt(base?.reasoning),
+    cache: {
+      read: tokenInt(cur.cache?.read) - tokenInt(base?.cache?.read),
+      write: tokenInt(cur.cache?.write) - tokenInt(base?.cache?.write),
+    },
+  }
+  const parts = [d.input, d.output, d.reasoning, d.cache.read, d.cache.write].map((x) => Math.max(0, x))
+  if (parts.every((x) => x === 0)) return
+  costs.byTaskTokens =
+    costs.byTaskTokens && typeof costs.byTaskTokens === "object" && !Array.isArray(costs.byTaskTokens) ? costs.byTaskTokens : {}
+  costs.byTask = costs.byTask && typeof costs.byTask === "object" ? costs.byTask : {}
+  if (costs.byTask[bucket] === undefined) costs.byTask[bucket] = 0
+  const b = costs.byTaskTokens[bucket]
+  const cur2 = b && typeof b === "object" ? b : { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }
+  costs.byTaskTokens[bucket] = {
+    input: tokenInt(cur2.input) + parts[0],
+    output: tokenInt(cur2.output) + parts[1],
+    reasoning: tokenInt(cur2.reasoning) + parts[2],
+    cache: {
+      read: tokenInt(cur2.cache?.read) + parts[3],
+      write: tokenInt(cur2.cache?.write) + parts[4],
+    },
+  }
+}
+
 /** True when the opencode_console MCP server is connected for this location. */
 async function isConsoleMcpConnected(ctx: any): Promise<boolean> {
   try {
@@ -768,9 +849,13 @@ export async function registerTeamworkTools(ctx: any, root: string) {
               budgetSource: input.budgetSource ? clean(input.budgetSource, 32) : "default",
               spentUsd: 0,
               byTask: {},
+              byTaskTokens: {},
               updatedAt: new Date().toISOString(),
             })
           } else {
+            if (!existing.byTaskTokens || typeof existing.byTaskTokens !== "object" || Array.isArray(existing.byTaskTokens)) {
+              existing.byTaskTokens = {}
+            }
             if (callSession) {
               const currentRoots = Array.isArray(existing.rootSessionIds) ? existing.rootSessionIds : []
               if (!currentRoots.includes(callSession)) {
@@ -873,6 +958,9 @@ export async function registerTeamworkTools(ctx: any, root: string) {
             return { content: `No costs.json for run ${basename(run)} — call teamwork_plan first.` }
           }
           costs.byTask = costs.byTask && typeof costs.byTask === "object" ? costs.byTask : {}
+          // Additive key: tolerate its absence in costs.json written before it existed.
+          costs.byTaskTokens =
+            costs.byTaskTokens && typeof costs.byTaskTokens === "object" && !Array.isArray(costs.byTaskTokens) ? costs.byTaskTokens : {}
           const budget = costs.budgetUsd ?? 20
 
           const snaps = readSnapshots(snapshotsFile) ?? { sessionId: basename(run), rootSessionIds: [], bySession: {} }
@@ -914,19 +1002,18 @@ export async function registerTeamworkTools(ctx: any, root: string) {
                 timestamp: now,
               }
 
-              if (delta > 0) {
-                let bucket: string
-                if (s.id === callSession && input.taskId) {
-                  bucket = clean(input.taskId, 64)
-                } else if (snaps.rootSessionIds.includes(s.id)) {
-                  bucket = input.taskId ? clean(input.taskId, 64) : "_sentinel"
-                } else if (s.agent) {
-                  bucket = clean(s.agent, 64)
-                } else {
-                  bucket = input.taskId ? clean(input.taskId, 64) : "_unattributed"
-                }
-                addToBucket(bucket, delta)
+              let bucket: string
+              if (s.id === callSession && input.taskId) {
+                bucket = clean(input.taskId, 64)
+              } else if (snaps.rootSessionIds.includes(s.id)) {
+                bucket = input.taskId ? clean(input.taskId, 64) : "_sentinel"
+              } else if (s.agent) {
+                bucket = input.taskId ? clean(input.taskId, 64) : clean(s.agent, 64)
+              } else {
+                bucket = input.taskId ? clean(input.taskId, 64) : "_unattributed"
               }
+              if (delta > 0) addToBucket(bucket, delta)
+              accumulateTokenDelta(costs, bucket, s.tokens, prev)
 
               totalTokens.input += s.tokens.input
               totalTokens.output += s.tokens.output
@@ -952,10 +1039,9 @@ export async function registerTeamworkTools(ctx: any, root: string) {
                 ? Math.round((usage.cost - prev.lastCost) * 1e4) / 1e4
                 : Math.round(usage.cost * 1e4) / 1e4
               snaps.bySession[callSession] = { lastCost: usage.cost, lastTokens: usage.tokens, timestamp: now }
-              if (delta > 0) {
-                const bucket = input.taskId ? clean(input.taskId, 64) : "_unattributed"
-                addToBucket(bucket, delta)
-              }
+              const bucket = input.taskId ? clean(input.taskId, 64) : "_unattributed"
+              if (delta > 0) addToBucket(bucket, delta)
+              accumulateTokenDelta(costs, bucket, usage.tokens, prev)
               costs.spentUsd =
                 Math.round(Object.values(costs.byTask).reduce((a: number, b: any) => a + (Number(b) || 0), 0) * 1e4) / 1e4
               costs.updatedAt = now
@@ -1252,6 +1338,11 @@ export async function registerTeamworkTools(ctx: any, root: string) {
             type: "string",
             description: "pending | worker_active | worker_done | verifier_active | verified_pass | verified_fail | blocked",
           },
+          agent: {
+            type: "string",
+            description:
+              "Optional. The actor that performed this transition (e.g. team/worker or team/verifier). Recorded in events.jsonl; when omitted the calling session's agent, then the plan-declared agent, is recorded.",
+          },
           round: { type: "number" },
           branch: { type: "string" },
           worktree: { type: "string" },
@@ -1270,12 +1361,13 @@ export async function registerTeamworkTools(ctx: any, root: string) {
         required: ["taskId", "status"],
         additionalProperties: false,
       },
-      execute: async (input: any) => {
+      execute: async (input: any, context: any) => {
         const resolved = resolveRun(root, input?.sessionId)
         if (resolved.error) return { content: resolved.error }
         const run = resolved.run as string
         const stateFile = join(run, "state.json")
         const planFile = join(run, "plan.dag.json")
+        const callSession = typeof context?.sessionID === "string" ? context.sessionID : undefined
 
         const taskId = clean(input.taskId, 64)
         if (!taskId) return { content: "Error: taskId is required" }
@@ -1348,6 +1440,13 @@ export async function registerTeamworkTools(ctx: any, root: string) {
           state.updatedAt = new Date().toISOString()
           writeJson(stateFile, state)
 
+          // Actor precedence (best-effort, fail-open): explicit input.agent, then the
+          // calling session's agent, then the plan-declared agent. clean() runs in appendEvent too.
+          const explicitAgent = typeof input.agent === "string" ? clean(input.agent, 64).trim() : ""
+          const callerAgent = explicitAgent ? undefined : await deriveCallerAgent(ctx, run, callSession)
+          const planAgent = def?.agent ? clean(def.agent, 64) : undefined
+          const recordedAgent = explicitAgent || callerAgent || planAgent || null
+
           // Log what actually landed in state.json (post-normalisation, post-coercion).
           await appendEvent(run, {
             event: "task_transition",
@@ -1356,7 +1455,7 @@ export async function registerTeamworkTools(ctx: any, root: string) {
             from: fromStatus,
             to: status,
             round,
-            agent: def?.agent ?? null,
+            agent: recordedAgent,
             branch: input.branch ?? current.branch ?? null,
             worktree: input.worktree ?? current.worktree ?? null,
             phase: state.phase ?? null,
