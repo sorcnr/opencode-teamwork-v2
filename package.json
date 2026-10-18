@@ -56,7 +56,8 @@
     "timeline": "node ./bin/opencode-teamwork.mjs timeline",
     "runs": "node ./bin/opencode-teamwork.mjs runs",
     "inspect": "node ./bin/opencode-teamwork.mjs inspect",
-    "prune": "node ./bin/opencode-teamwork.mjs prune"
+    "prune": "node ./bin/opencode-teamwork.mjs prune",
+    "export": "node ./bin/opencode-teamwork.mjs export"
   },
   "engines": {
     "node": ">=18"
