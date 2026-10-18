@@ -394,6 +394,88 @@ await check("cost attribution: per-task tokens are null; totals carry the run to
   assert.strictEqual(eventsTimeline.totals.spentUsd, 0.21)
 })
 
+// Populated per-task token buckets (costs.byTaskTokens). The legacy check above
+// keeps covering the path with no bucket; these cover the path that surfaces one.
+const BT_ALPHA = { input: 1234, output: 567, reasoning: 8, cache: { read: 90, write: 11 } }
+
+await check("cost attribution: per-task tokens are surfaced from byTaskTokens with the exact numbers", () => {
+  const costs = { ...COSTS, byTaskTokens: { alpha: BT_ALPHA } }
+  for (const root of [makeRun({ events: EVENTS, costs }), makeRun({ events: null, costs })]) {
+    const t = buildTimeline(root, SESSION)
+    const alpha = taskOf(t, "alpha").tokens
+    assert.deepStrictEqual(alpha, BT_ALPHA, `alpha tokens must equal the bucket (mode ${t.mode})`)
+    assert.strictEqual(alpha.input, 1234)
+    assert.strictEqual(alpha.output, 567)
+    assert.strictEqual(alpha.reasoning, 8)
+    assert.strictEqual(alpha.cache.read, 90)
+    assert.strictEqual(alpha.cache.write, 11)
+    assert.strictEqual(taskOf(t, "beta").tokens, null, "beta has no bucket, so its tokens stay null")
+    assert.deepStrictEqual(t.totals.tokens, COSTS.tokens, "run totals must be unaffected by per-task buckets")
+  }
+})
+
+await check("cost attribution: a zero-valued bucket is a real measurement, not null", () => {
+  const zero = { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }
+  const t = buildTimeline(makeRun({ events: EVENTS, costs: { ...COSTS, byTaskTokens: { alpha: zero } } }), SESSION)
+  assert.deepStrictEqual(taskOf(t, "alpha").tokens, zero)
+})
+
+await check("cost attribution: per-task tokens are null when only other tasks have a bucket", () => {
+  const costs = { ...COSTS, byTaskTokens: { beta: { input: 5, output: 6, reasoning: 7, cache: { read: 8, write: 9 } } } }
+  const t = buildTimeline(makeRun({ events: EVENTS, costs }), SESSION)
+  assert.strictEqual(taskOf(t, "alpha").tokens, null, "alpha has no bucket")
+  assert.deepStrictEqual(taskOf(t, "beta").tokens, { input: 5, output: 6, reasoning: 7, cache: { read: 8, write: 9 } })
+})
+
+await check("cost attribution: a malformed token bucket yields null, never a throw or NaN", () => {
+  const BAD = [
+    "nope",
+    null,
+    42,
+    [1, 2, 3, 4],
+    { input: -1, output: 1, reasoning: 0, cache: { read: 0, write: 0 } },
+    { input: 1, output: 1, reasoning: 0, cache: { read: 0 } },
+    { input: 1, output: 1, reasoning: 0 },
+    { input: 1, output: 1, reasoning: 0, cache: 5 },
+    { input: "NaN", output: 1, reasoning: 0, cache: { read: 0, write: 0 } },
+    { output: 1, reasoning: 0, cache: { read: 0, write: 0 } },
+  ]
+  for (const bad of BAD) {
+    for (const events of [EVENTS, null]) {
+      const label = `${JSON.stringify(bad)} (mode ${events ? "events" : "derived"})`
+      const t = buildTimeline(makeRun({ events, costs: { ...COSTS, byTaskTokens: { alpha: bad } } }), SESSION)
+      assert.strictEqual(taskOf(t, "alpha").tokens, null, `malformed bucket ${label} must yield null`)
+      const text = renderTimeline(t, { color: false }).join("\n")
+      assert(!text.includes("NaN"), `render must never print NaN for ${label}`)
+      assert(!JSON.stringify(t).includes("NaN"), `output must never contain NaN for ${label}`)
+    }
+  }
+})
+
+await check("frozen shape: buildTimeline key sets are exactly the R2 contract, literal and unchanged", () => {
+  const costs = { ...COSTS, byTaskTokens: { alpha: BT_ALPHA } }
+  for (const t of [buildTimeline(makeRun({ events: EVENTS, costs }), SESSION), buildTimeline(makeRun({ events: null, costs }), SESSION)]) {
+    assert.deepStrictEqual(
+      Object.keys(t).sort(),
+      ["budgetSource", "budgetUsd", "durationMs", "endedAt", "mode", "phase", "sessionId", "spentUsd", "startedAt", "tasks", "topology", "totals", "unattributed"],
+    )
+    assert.deepStrictEqual(
+      Object.keys(t.totals).sort(),
+      ["blocked", "failed", "passed", "spentUsd", "tasks", "tokens", "totalRounds"],
+    )
+    for (const task of t.tasks) {
+      assert.deepStrictEqual(
+        Object.keys(task).sort(),
+        ["agent", "approx", "branch", "costUsd", "durationMs", "endedAt", "note", "passedAtRound", "rounds", "startedAt", "status", "taskId", "tokens"],
+        `task keys for ${task.taskId}`,
+      )
+    }
+    assert.deepStrictEqual(Object.keys(taskOf(t, "alpha").tokens).sort(), ["cache", "input", "output", "reasoning"])
+    assert.deepStrictEqual(Object.keys(taskOf(t, "alpha").tokens.cache).sort(), ["read", "write"])
+    for (const u of t.unattributed) assert.deepStrictEqual(Object.keys(u).sort(), ["bucket", "costUsd"])
+  }
+})
+
 // ==========================================
 // 6. render purity / colour
 // ==========================================

@@ -14,6 +14,7 @@ Every run writes under one root:
 ├── plan.dag.json            # task DAG
 ├── state.json               # resumable coordinator state
 ├── costs.json               # coordinator-maintained budget tracker
+├── events.jsonl             # append-only lifecycle event log (JSON Lines)
 ├── pitfalls.md              # answer-agnostic failure registry
 ├── scout-report.md          # scout output
 ├── candidates/cand-<n>.md   # one per proposer
@@ -145,8 +146,72 @@ The plugin provides deterministic orchestration tools for the Sentinel coordinat
 ### `costs.json`
 
 ```json
-{ "sessionId": "...", "budgetUsd": 20, "budgetSource": "credits|default|manual", "spentUsd": 0, "byTask": {}, "updatedAt": "ISO8601" }
+{
+  "sessionId": "...",
+  "budgetUsd": 20,
+  "budgetSource": "credits|default|manual",
+  "spentUsd": 0,
+  "byTask": {},
+  "byTaskTokens": {},
+  "updatedAt": "ISO8601"
+}
 ```
+
+`byTask` maps a bucket name to its cumulative spend in USD. `byTaskTokens` is an
+additive key (added after the original schema) keyed by bucket name. Both are
+updated in the same locked section, but their key sets are **not** guaranteed to
+be identical: every `byTaskTokens` key is also a `byTask` key, while a `byTask`
+bucket can have spend and no `byTaskTokens` entry (see the all-zero case below):
+
+```json
+{
+  "byTask":       { "R1-impl": 0.1234 },
+  "byTaskTokens": { "R1-impl": { "input": 1200, "output": 640, "reasoning": 0, "cache": { "read": 300, "write": 40 } } }
+}
+```
+
+Each `byTaskTokens` bucket holds integer token deltas (current session totals
+minus the `lastTokens` recorded in `snapshots.json`), the same way cost deltas
+are computed. A `costs.json` without `byTaskTokens` is valid: readers treat it as
+absent. The manual `addUsd` path has no token data, so it adds dollars to `byTask`
+only and leaves `byTaskTokens` untouched. The session-global `tokens` total is
+unchanged.
+
+A token delta whose five components are all zero (for example, a session whose
+cost rose but whose tokens did not change) is skipped **before** either map is
+touched. In that case the bucket still gains its spend in `byTask` but gets no
+`byTaskTokens` key. Readers must treat a missing `byTaskTokens[<bucket>]` as "no
+token data", not as zero.
+
+**Bucket names are safe map keys.** A `taskId` must match
+`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`. Both `teamwork_plan` (task ids and
+`dependsOn`) and `teamwork_cost` (`taskId`) refuse anything else, so ids such as
+`__proto__` or `a/b` are never stored. `byTask`, `byTaskTokens` and `state.tasks`
+are null-prototype maps in memory, so an id such as `constructor` is an ordinary
+key. The allowlist is the guard; `clean()` alone does not prevent these ids.
+
+**Bucketing rule.** Each session in the run's tree is assigned a bucket when
+`teamwork_cost` finds spend for it:
+
+1. The calling session, when `taskId` is supplied → `taskId`.
+2. A root session (the run's sentinel) → `taskId` if supplied, else `_sentinel`.
+3. Any other (non-root, e.g. worker or verifier) session → `taskId` if supplied,
+   else its agent name (the legacy behaviour), else `_unattributed`.
+
+So when the sentinel calls `teamwork_cost({ taskId })` at a task boundary, the
+spend of the worker and verifier sessions lands on **that task**. Without a
+`taskId`, subagent spend is still bucketed by agent name, exactly as before.
+
+**Per-task attribution requires the sentinel to call it.** Per-task cost and
+tokens only populate for runs whose sentinel called `teamwork_cost({ taskId })`
+after each worker return and each verifier report. Spend recorded by calls made
+without a `taskId` stays in agent-name or `_sentinel` buckets.
+
+**Timeline `tokens`.** The timeline view (`lib/timeline.mjs`) reports each task's
+`tokens` as `costs.byTaskTokens[<taskId>]`, when that bucket exists and holds
+finite numbers. It is `null` otherwise, and **always `null` for any run recorded
+before `byTaskTokens` existed**. Per-task token counts are not reconstructed for
+older runs.
 
 When the session uses `opencode/` (managed) models and the `opencode_console`
 MCP is connected, `teamwork_budget` tells the sentinel to derive `budgetUsd`
@@ -186,6 +251,77 @@ Each `teamwork_cost` call queries the entire session tree, computes
 adds new spend to `costs.json`, and advances `lastCost`. Because the running total
 is the sum of these deltas across the entire tree, cumulative cost is never
 double-counted and subagent consumption is never lost or ignored.
+
+### `events.jsonl` — lifecycle event log (JSON Lines)
+
+Append-only log of run lifecycle events. Each event is one JSON object on its own
+line, terminated by `\n`. Lines are only ever appended; nothing rewrites earlier
+lines.
+
+Every line has these 11 fields, always present (`null` where not applicable):
+
+- `ts` (string): ISO 8601 time the event was written
+- `event` (string): `run_created`, `task_transition`, or `security_audit`
+- `sessionId` (string): Run session id (≤64 chars)
+- `taskId` (string or null): Task id (≤64 chars); `null` for run-level events
+- `from` (string or null): Previous task status (≤32 chars)
+- `to` (string): New task status, or `PASS`/`FAIL` for `security_audit` (≤32 chars)
+- `round` (integer): Task round; `0` when not applicable
+- `agent` (string or null): Actor that performed the transition (≤64 chars). **Caller-reported (self-reported)**, see the **Actor** paragraph below.
+- `branch` (string or null): Task branch (≤120 chars)
+- `worktree` (string or null): Task worktree path (≤200 chars)
+- `phase` (string or null): Run phase after the event (≤32 chars)
+
+The three event kinds:
+
+- `run_created`: written by `teamwork_plan` once the run is created. `taskId` and
+  `from` are `null`, `to` is `"pending"`, `round` is `0`, `phase` is `"DAG_BUILD"`.
+- `task_transition`: written by `teamwork_task_update` after `state.json` is saved.
+  `from` is the previous status and `to` the status that landed. `round`, `branch`,
+  `worktree` and `phase` are the values after the transition.
+- `security_audit`: written by `teamwork_security_audit`. `to` is `"PASS"` or
+  `"FAIL"`, and `phase` is the run phase. `taskId`, `from`, `branch`, `worktree` and
+  `agent` are `null`, and `round` is `0`.
+
+Example (one `task_transition` line, wrapped here for readability):
+
+```json
+{"ts":"2026-01-12T10:15:00.000Z","event":"task_transition","sessionId":"20260112-101500-a1b2",
+ "taskId":"R1-impl","from":"worker_active","to":"worker_done","round":1,
+ "agent":"team/worker","branch":"teamwork/20260112-101500-a1b2-R1-impl",
+ "worktree":"../.teamwork-worktrees/20260112-101500-a1b2/R1-impl","phase":"DISPATCH"}
+```
+
+**Actor (`agent`) — caller-reported, not verified.** On `task_transition` the field
+records the actor, resolved in this order: (1) the explicit `agent` input to
+`teamwork_task_update`, (2) the calling session's agent, read from the session
+tree, (3) the agent declared for the task in `plan.dag.json`. The sentinel passes
+`agent: "team/worker"` on `worker_done` and `agent: "team/verifier"` on
+`verified_pass` / `verified_fail`. The value is self-reported: the engine does not
+check that the named agent actually performed the transition. No engine decision
+reads it; the timeline view only displays it. Treat it as a label, not as evidence
+of who acted.
+
+**Sanitising.** The caller-supplied and file-derived string fields (`sessionId`,
+`taskId`, `from`, `to`, `agent`, `branch`, `worktree`, `phase`) are passed through
+`clean()` and truncated to the limit above. `ts` is generated by the engine
+(`new Date().toISOString()`) and `event` is a code-supplied literal, so neither goes
+through `clean()`. `clean()` replaces C0 control characters, DEL, C1 controls
+(U+0080–U+009F, including U+0085), and U+2028/U+2029 with spaces. A value can
+therefore never add a second physical line. It is a line-safety and display
+sanitiser, not a complete defence against hostile text, and it does not guard
+against prototype-key collisions (see Bucket names above).
+
+**Locking and symlinks.** Each append runs inside a per-file, in-process lock
+(`withFileLock` keyed on the `events.jsonl` path). A symlinked
+`events.jsonl` is refused: nothing is written through the link, and the link is left
+in place.
+
+**Best-effort, fail-open.** Writing is best-effort. Any error (including a refused
+symlink) is swallowed, and no tool result changes because of it. The DAG engine
+(`teamwork_next`, `teamwork_task_update`) never reads `events.jsonl`, so a run works
+fully without it. Only the timeline view reads it. Without it the timeline falls back
+to derived mode, with start and duration unknown.
 
 ### `verify/report-<task>.json` (verifier output)
 

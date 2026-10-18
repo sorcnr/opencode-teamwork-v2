@@ -46,7 +46,8 @@ Then:
    - Its own worktree
    - A scoped \`spec.json\`
    - Returns: \`patch.diff\` + \`summary.md\` + cost metrics
-4. Dispatch verifiers against each worker's diff. Aggregated results go in \`.opencode/teamwork/<session-id>/verify/summary.json\`.
+   - On return: \`teamwork_cost({ taskId })\`, then \`teamwork_task_update\` with \`agent: "team/worker"\`
+4. Dispatch verifiers against each worker's diff. Aggregated results go in \`.opencode/teamwork/<session-id>/verify/summary.json\`. On each verifier report: \`teamwork_cost({ taskId })\`, then \`teamwork_task_update\` with \`agent: "team/verifier"\`.
 5. If FAIL, send the verifier's \`feedback_for_worker.md\` back to the worker for the next round. Loop until PASS, maxRounds, or budget exhausted.
 6. When all tasks PASS, run the mandatory pre-merge security audit via @team/security-auditor and teamwork_security_audit. Once approved (PASS), merge the sentinel worktree back to the user's branch. On partial, present the partial + the open verification reports.
 7. After the run completes (full or partial), spawn a \`team/verifier\` agent to independently verify the final merged result against the spec's acceptance criteria; write its report to \`.opencode/teamwork/$SESSION_ID/verify/final.json\`.

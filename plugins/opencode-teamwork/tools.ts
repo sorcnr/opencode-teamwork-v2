@@ -342,6 +342,88 @@ async function readSessionUsage(
   }
 }
 
+/** Reject if `p` does not settle within `ms`; the timer is always cleared. */
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const guard = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error("timeout")), ms)
+  })
+  return Promise.race([p, guard]).finally(() => clearTimeout(timer))
+}
+
+/**
+ * Best-effort actor lookup for the calling session. Fail-open: never throws and
+ * never blocks longer than 2s. Order: the client's session.get agent, then the
+ * agent recorded for that session in snapshots.json (same source as
+ * bySession[*].agent). Returns undefined when neither is available.
+ */
+async function deriveCallerAgent(ctx: any, run: string, sessionID: string | undefined): Promise<string | undefined> {
+  if (!sessionID) return undefined
+  try {
+    if (typeof ctx?.session?.get === "function") {
+      const info: any = await withTimeout(Promise.resolve(ctx.session.get({ sessionID })), 2000)
+      const a = typeof info?.agent === "string" ? clean(info.agent, 64).trim() : ""
+      if (a) return a
+    }
+  } catch {}
+  try {
+    const a = readSnapshots(join(run, "snapshots.json"))?.bySession?.[sessionID]?.agent
+    if (typeof a === "string") {
+      const c = clean(a, 64).trim()
+      if (c) return c
+    }
+  } catch {}
+  return undefined
+}
+
+type TokenTotals = { input: number; output: number; reasoning: number; cache: { read: number; write: number } }
+
+/** Non-negative integer, 0 for anything non-finite. */
+function tokenInt(v: unknown): number {
+  const n = Math.round(Number(v))
+  return Number.isFinite(n) && n > 0 ? n : 0
+}
+
+/**
+ * Add the token delta (cur - prev.lastTokens) of one session to
+ * costs.byTaskTokens[bucket]. Mirrors the cost-delta baseline: no prior snapshot
+ * means the full current total is the delta. A prior snapshot without
+ * lastTokens cannot yield an honest delta, so it is skipped. An all-zero token
+ * delta returns early WITHOUT touching either map, so byTaskTokens and byTask
+ * key sets can diverge (a bucket can have spend and no token entry).
+ * Both maps are null-prototype (see nullMap) so no bucket name collides.
+ */
+function accumulateTokenDelta(costs: any, bucket: string, cur: TokenTotals | undefined, prev: any) {
+  if (!cur || typeof cur !== "object") return
+  if (prev && !prev.lastTokens) return
+  const base: any = prev ? prev.lastTokens : undefined
+  const d = {
+    input: tokenInt(cur.input) - tokenInt(base?.input),
+    output: tokenInt(cur.output) - tokenInt(base?.output),
+    reasoning: tokenInt(cur.reasoning) - tokenInt(base?.reasoning),
+    cache: {
+      read: tokenInt(cur.cache?.read) - tokenInt(base?.cache?.read),
+      write: tokenInt(cur.cache?.write) - tokenInt(base?.cache?.write),
+    },
+  }
+  const parts = [d.input, d.output, d.reasoning, d.cache.read, d.cache.write].map((x) => Math.max(0, x))
+  if (parts.every((x) => x === 0)) return
+  costs.byTaskTokens = nullMap(costs.byTaskTokens)
+  costs.byTask = nullMap(costs.byTask)
+  if (costs.byTask[bucket] === undefined) costs.byTask[bucket] = 0
+  const b = costs.byTaskTokens[bucket]
+  const cur2 = b && typeof b === "object" ? b : { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }
+  costs.byTaskTokens[bucket] = {
+    input: tokenInt(cur2.input) + parts[0],
+    output: tokenInt(cur2.output) + parts[1],
+    reasoning: tokenInt(cur2.reasoning) + parts[2],
+    cache: {
+      read: tokenInt(cur2.cache?.read) + parts[3],
+      write: tokenInt(cur2.cache?.write) + parts[4],
+    },
+  }
+}
+
 /** True when the opencode_console MCP server is connected for this location. */
 async function isConsoleMcpConnected(ctx: any): Promise<boolean> {
   try {
@@ -441,11 +523,31 @@ function newSessionId(): string {
   return `${ts}-${hex}`
 }
 
-/** Strip control characters / newlines and cap length. Never inject raw file text. */
+/**
+ * Strip control characters (C0, DEL, C1 incl. U+0085) / line separators and cap
+ * length. Never inject raw file text. Matches lib/timeline.mjs CONTROL_CHARS.
+ * NOT a prototype-safety mechanism: task ids need the TASK_ID allowlist and
+ * object-keyed state needs nullMap().
+ */
 function clean(value: unknown, max = 64): string {
   return String(value ?? "")
-    .replace(/[\r\n\t\x00-\x1f\u2028\u2029]/g, " ")
+    .replace(/[\r\n\t\x00-\x1f\x7f-\x9f\u0085\u2028\u2029]/g, " ")
     .slice(0, max)
+}
+
+/**
+ * Null-prototype copy of an object-keyed map (byTask, byTaskTokens, state.tasks).
+ * With no prototype, no inherited member name (constructor, __proto__, ...) can
+ * collide with a task/bucket key. Own keys are copied with [[Set]] onto a
+ * null-prototype target, so a "__proto__" key becomes an ordinary own property.
+ * JSON.stringify serialises the result exactly like a plain object.
+ */
+function nullMap<T = any>(src?: unknown): Record<string, T> {
+  const out: Record<string, T> = Object.create(null)
+  if (src && typeof src === "object" && !Array.isArray(src)) {
+    for (const k of Object.keys(src as object)) out[k] = (src as Record<string, T>)[k]
+  }
+  return out
 }
 
 function runsDir(root: string) {
@@ -733,6 +835,15 @@ export async function registerTeamworkTools(ctx: any, root: string) {
         const resolved = resolveRun(root, sessionId)
         if (resolved.error) return { content: resolved.error }
         const run = resolved.run as string
+        // SEC-1: task ids become keys of state/costs maps and path/branch segments.
+        // Refuse the whole plan (before anything is written) on any unsafe id.
+        for (const t of input.tasks || []) {
+          const ids = [t?.id, ...(Array.isArray(t?.dependsOn) ? t.dependsOn : [])]
+          const i = ids.findIndex((id: unknown) => typeof id !== "string" || !isSafeTaskId(id))
+          if (i !== -1) {
+            return { content: `refused: invalid task id "${clean(ids[i], 32)}" (must be a single segment matching ${TASK_ID})` }
+          }
+        }
         mkdirSync(run, { recursive: true })
         const tasks = (input.tasks || []).map((t: any) => ({
           id: clean(t.id, 64),
@@ -749,7 +860,7 @@ export async function registerTeamworkTools(ctx: any, root: string) {
             version: 1,
             sessionId,
             phase: "DISPATCH",
-            tasks: Object.fromEntries(tasks.map((t: any) => [t.id, { status: "pending", round: 0 }])),
+            tasks: nullMap(Object.fromEntries(tasks.map((t: any) => [t.id, { status: "pending", round: 0 }]))),
             updatedAt: new Date().toISOString(),
           })
         }
@@ -767,10 +878,13 @@ export async function registerTeamworkTools(ctx: any, root: string) {
               budgetUsd: budget,
               budgetSource: input.budgetSource ? clean(input.budgetSource, 32) : "default",
               spentUsd: 0,
-              byTask: {},
+              byTask: nullMap(),
+              byTaskTokens: nullMap(),
               updatedAt: new Date().toISOString(),
             })
           } else {
+            existing.byTaskTokens = nullMap(existing.byTaskTokens)
+            existing.byTask = nullMap(existing.byTask)
             if (callSession) {
               const currentRoots = Array.isArray(existing.rootSessionIds) ? existing.rootSessionIds : []
               if (!currentRoots.includes(callSession)) {
@@ -857,6 +971,11 @@ export async function registerTeamworkTools(ctx: any, root: string) {
         "Read the run budget and report real spend across the full session tree (Sentinel + all workers/verifiers). Uses OpenCode's native cost and token tracking; falls back to manual addUsd when client/db is unavailable. Warns at 80%.",
       input: { type: "object", properties: { sessionId: { type: "string" }, addUsd: { type: "number" }, taskId: { type: "string" } }, additionalProperties: false },
       execute: async (input: any, context: any) => {
+        // SEC-1: the taskId becomes a costs.byTask key. Refuse unsafe ids (e.g.
+        // "__proto__", "a/b") before any read or write.
+        if (input?.taskId && (typeof input.taskId !== "string" || !isSafeTaskId(input.taskId))) {
+          return { content: `refused: invalid task id "${clean(input.taskId, 32)}" (must be a single segment matching ${TASK_ID})` }
+        }
         const resolved = resolveRun(root, input?.sessionId)
         if (resolved.error) return { content: resolved.error }
         const run = resolved.run as string
@@ -872,7 +991,10 @@ export async function registerTeamworkTools(ctx: any, root: string) {
           if (!costs || typeof costs !== "object") {
             return { content: `No costs.json for run ${basename(run)} — call teamwork_plan first.` }
           }
-          costs.byTask = costs.byTask && typeof costs.byTask === "object" ? costs.byTask : {}
+          // Null-prototype maps (SEC-1): no bucket name can collide with an inherited member.
+          costs.byTask = nullMap(costs.byTask)
+          // Additive key: tolerate its absence in costs.json written before it existed.
+          costs.byTaskTokens = nullMap(costs.byTaskTokens)
           const budget = costs.budgetUsd ?? 20
 
           const snaps = readSnapshots(snapshotsFile) ?? { sessionId: basename(run), rootSessionIds: [], bySession: {} }
@@ -914,19 +1036,18 @@ export async function registerTeamworkTools(ctx: any, root: string) {
                 timestamp: now,
               }
 
-              if (delta > 0) {
-                let bucket: string
-                if (s.id === callSession && input.taskId) {
-                  bucket = clean(input.taskId, 64)
-                } else if (snaps.rootSessionIds.includes(s.id)) {
-                  bucket = input.taskId ? clean(input.taskId, 64) : "_sentinel"
-                } else if (s.agent) {
-                  bucket = clean(s.agent, 64)
-                } else {
-                  bucket = input.taskId ? clean(input.taskId, 64) : "_unattributed"
-                }
-                addToBucket(bucket, delta)
+              let bucket: string
+              if (s.id === callSession && input.taskId) {
+                bucket = clean(input.taskId, 64)
+              } else if (snaps.rootSessionIds.includes(s.id)) {
+                bucket = input.taskId ? clean(input.taskId, 64) : "_sentinel"
+              } else if (s.agent) {
+                bucket = input.taskId ? clean(input.taskId, 64) : clean(s.agent, 64)
+              } else {
+                bucket = input.taskId ? clean(input.taskId, 64) : "_unattributed"
               }
+              if (delta > 0) addToBucket(bucket, delta)
+              accumulateTokenDelta(costs, bucket, s.tokens, prev)
 
               totalTokens.input += s.tokens.input
               totalTokens.output += s.tokens.output
@@ -952,10 +1073,9 @@ export async function registerTeamworkTools(ctx: any, root: string) {
                 ? Math.round((usage.cost - prev.lastCost) * 1e4) / 1e4
                 : Math.round(usage.cost * 1e4) / 1e4
               snaps.bySession[callSession] = { lastCost: usage.cost, lastTokens: usage.tokens, timestamp: now }
-              if (delta > 0) {
-                const bucket = input.taskId ? clean(input.taskId, 64) : "_unattributed"
-                addToBucket(bucket, delta)
-              }
+              const bucket = input.taskId ? clean(input.taskId, 64) : "_unattributed"
+              if (delta > 0) addToBucket(bucket, delta)
+              accumulateTokenDelta(costs, bucket, usage.tokens, prev)
               costs.spentUsd =
                 Math.round(Object.values(costs.byTask).reduce((a: number, b: any) => a + (Number(b) || 0), 0) * 1e4) / 1e4
               costs.updatedAt = now
@@ -989,7 +1109,8 @@ export async function registerTeamworkTools(ctx: any, root: string) {
 
           const pct = budget ? Math.floor((costs.spentUsd / budget) * 100) : 0
           const warn = pct >= 80 ? `\n⚠ ${pct}% of budget used — halt non-essential workers and ask the user.` : ""
-          const taskBreakdown = Object.entries(costs.byTask).map(([k, v]) => `    ${k}: $${v}`).join("\n")
+          // SEC-3: the bucket key is echoed to the caller, so it is sanitised too.
+          const taskBreakdown = Object.entries(costs.byTask).map(([k, v]) => `    ${clean(k, 64)}: $${v}`).join("\n")
           return {
             content: `Budget: $${budget} · spent: $${costs.spentUsd} (${pct}%)${warn}${taskBreakdown ? `\nPer-task:\n${taskBreakdown}` : ""}\n(source: ${source})`,
             shouldHalt: pct >= 80,
@@ -1074,7 +1195,7 @@ export async function registerTeamworkTools(ctx: any, root: string) {
         }
 
         const taskDefs = new Map<string, any>(plan.tasks.map((t: any) => [t.id, t]))
-        const taskStates = state.tasks as Record<string, any>
+        const taskStates = nullMap<any>(state.tasks)
 
         const isPassed = (id: string) => {
           const s = taskStates[id]?.status
@@ -1252,6 +1373,11 @@ export async function registerTeamworkTools(ctx: any, root: string) {
             type: "string",
             description: "pending | worker_active | worker_done | verifier_active | verified_pass | verified_fail | blocked",
           },
+          agent: {
+            type: "string",
+            description:
+              "Optional. The actor that performed this transition (e.g. team/worker or team/verifier). Recorded in events.jsonl; when omitted the calling session's agent, then the plan-declared agent, is recorded.",
+          },
           round: { type: "number" },
           branch: { type: "string" },
           worktree: { type: "string" },
@@ -1270,12 +1396,13 @@ export async function registerTeamworkTools(ctx: any, root: string) {
         required: ["taskId", "status"],
         additionalProperties: false,
       },
-      execute: async (input: any) => {
+      execute: async (input: any, context: any) => {
         const resolved = resolveRun(root, input?.sessionId)
         if (resolved.error) return { content: resolved.error }
         const run = resolved.run as string
         const stateFile = join(run, "state.json")
         const planFile = join(run, "plan.dag.json")
+        const callSession = typeof context?.sessionID === "string" ? context.sessionID : undefined
 
         const taskId = clean(input.taskId, 64)
         if (!taskId) return { content: "Error: taskId is required" }
@@ -1285,9 +1412,11 @@ export async function registerTeamworkTools(ctx: any, root: string) {
           if (!state || typeof state.tasks !== "object") {
             return { content: `Error: No state.json found for run ${basename(run)}.` }
           }
+          // SEC-1: null-prototype task map; existence is an OWN-property check, never truthiness.
+          state.tasks = nullMap(state.tasks)
           const plan = readJson<any>(planFile, undefined)
           const def = Array.isArray(plan?.tasks) ? plan.tasks.find((t: any) => t.id === taskId) : undefined
-          if (!def && !state.tasks[taskId]) {
+          if (!def && !Object.prototype.hasOwnProperty.call(state.tasks, taskId)) {
             return { content: `Error: Task "${taskId}" not found in plan or state.` }
           }
 
@@ -1348,6 +1477,13 @@ export async function registerTeamworkTools(ctx: any, root: string) {
           state.updatedAt = new Date().toISOString()
           writeJson(stateFile, state)
 
+          // Actor precedence (best-effort, fail-open): explicit input.agent, then the
+          // calling session's agent, then the plan-declared agent. clean() runs in appendEvent too.
+          const explicitAgent = typeof input.agent === "string" ? clean(input.agent, 64).trim() : ""
+          const callerAgent = explicitAgent ? undefined : await deriveCallerAgent(ctx, run, callSession)
+          const planAgent = def?.agent ? clean(def.agent, 64) : undefined
+          const recordedAgent = explicitAgent || callerAgent || planAgent || null
+
           // Log what actually landed in state.json (post-normalisation, post-coercion).
           await appendEvent(run, {
             event: "task_transition",
@@ -1356,14 +1492,15 @@ export async function registerTeamworkTools(ctx: any, root: string) {
             from: fromStatus,
             to: status,
             round,
-            agent: def?.agent ?? null,
+            agent: recordedAgent,
             branch: input.branch ?? current.branch ?? null,
             worktree: input.worktree ?? current.worktree ?? null,
             phase: state.phase ?? null,
           })
 
           return {
-            content: `Task ${taskId} updated: status=${status}, round=${round}${input.branch ? `, branch=${input.branch}` : ""}${status === "blocked" ? " (BLOCKED: max rounds reached)" : ""}`,
+            // SEC-3: the branch is echoed to the caller, so it is sanitised like every other field.
+            content: `Task ${taskId} updated: status=${status}, round=${round}${input.branch ? `, branch=${clean(input.branch, 120)}` : ""}${status === "blocked" ? " (BLOCKED: max rounds reached)" : ""}`,
             taskId,
             status,
             round,
