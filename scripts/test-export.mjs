@@ -287,6 +287,43 @@ await check("CLI: `-o <file>` writes a file whose content matches the rendered H
   assert(res.stdout.trim().endsWith("report-out.html"), `stdout must name the written path, got ${JSON.stringify(res.stdout)}`)
 })
 
+// `-o` and `--output` are separate case labels in the CLI, so each gets its own check:
+// deleting either alias must fail the suite on its own.
+await check("CLI: `--output <file>` writes a file whose content matches the rendered HTML", () => {
+  const res = runCli(["export", SESSION, "--output", "report-long.html"], healthyRoot)
+  assert.strictEqual(res.status, 0, `--output must exit 0, got ${res.status}: ${res.stderr}`)
+  const file = join(healthyRoot, "report-long.html")
+  assert(existsSync(file), "--output must create the named file")
+  assert.strictEqual(readFileSync(file, "utf8"), renderExport(healthyData, { format: "html" }), "file content must equal the rendered document")
+  assert(!res.stderr.includes("unknown argument"), "--output must not be treated as an unknown argument")
+  assert(res.stdout.trim().endsWith(file), `stdout must print the absolute path ${file}, got ${JSON.stringify(res.stdout)}`)
+})
+
+// Markdown: `-m` and `--markdown` are separate case labels too. Paired with `-o -` so the
+// assertion is on stdout content (HTML by default, Markdown only if the alias is honoured).
+await check("CLI: `-m` selects Markdown output", () => {
+  const res = runCli(["export", SESSION, "-m", "-o", "-"], healthyRoot)
+  assert.strictEqual(res.status, 0, `-m must exit 0, got ${res.status}: ${res.stderr}`)
+  assert.strictEqual(res.stdout, renderExport(healthyData, { format: "markdown" }), "-m must stream the Markdown document")
+  assert(!res.stderr.includes("unknown argument"), "-m must not be treated as an unknown argument")
+})
+
+await check("CLI: `--markdown` selects Markdown output", () => {
+  const res = runCli(["export", SESSION, "--markdown", "-o", "-"], healthyRoot)
+  assert.strictEqual(res.status, 0, `--markdown must exit 0, got ${res.status}: ${res.stderr}`)
+  assert.strictEqual(res.stdout, renderExport(healthyData, { format: "markdown" }), "--markdown must stream the Markdown document")
+  assert(!res.stderr.includes("unknown argument"), "--markdown must not be treated as an unknown argument")
+})
+
+// `--session <id>` vs the positional id: without the alias, the flag is "unknown" and the id
+// only survives via the positional fallback, so the stderr assertion is what catches removal.
+await check("CLI: `--session <id>` selects the run (no unknown-argument warning)", () => {
+  const res = runCli(["export", "--session", SESSION, "-o", "-"], healthyRoot)
+  assert.strictEqual(res.status, 0, `--session must exit 0, got ${res.status}: ${res.stderr}`)
+  assert.strictEqual(res.stdout, renderExport(healthyData, { format: "html" }), "--session must stream the requested run's HTML")
+  assert(!res.stderr.includes("unknown argument"), "--session must not be treated as an unknown argument")
+})
+
 await check("CLI: `-o -` writes the document to stdout and creates no file", () => {
   const before = readdirSync(healthyRoot).sort()
   const res = runCli(["export", SESSION, "-o", "-"], healthyRoot)
