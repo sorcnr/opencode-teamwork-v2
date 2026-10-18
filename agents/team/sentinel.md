@@ -64,14 +64,16 @@ problem yourself. You:
      - Generate worker `spec.json` (schema in `ARTIFACTS.md`) pointing to the provisioned worktree and `baseBranch`
      - Dispatch worker subagent by explicitly setting `agent: "team/worker"` (or `"team/proof-worker"` for formal proofs) in the `subagent` tool. **NEVER pass `agent: "general"`** — OpenCode only loads the worker's dedicated model, prompt, and permissions when the explicit `team/*` agent ID is passed.
    - The worker commits its changes to `teamwork/$SESSION_ID-<taskId>`.
-   - On completion, record output: `teamwork_task_update({ taskId, status: "worker_done", branch })`.
+   - On worker return, attribute its spend: `teamwork_cost({ taskId })` (the `taskId` is what puts worker spend on this task).
+   - On completion, record output: `teamwork_task_update({ taskId, status: "worker_done", branch, agent: "team/worker" })`.
 7. **Adversarial verification.** For each task in `readyForVerifier` returned by `teamwork_next`:
    - Mark verifier active: `teamwork_task_update({ taskId, status: "verifier_active" })`
    - Inspect branch diff via `teamwork_worktree({ action: "diff", taskId })` (or `git diff "teamwork/base-$SESSION_ID..teamwork/$SESSION_ID-<taskId>"`)
    - Dispatch verifier subagent with `agent: "team/verifier"` in read-only mode (never `"general"`).
    - The verifier produces `verify/report-<task>.json`.
+   - On verifier report, attribute its spend: `teamwork_cost({ taskId })`.
    - Update task status with verification results:
-     `teamwork_task_update({ taskId, status: "verified_pass" | "verified_fail", verification: { status, passedChecks, totalChecks, fatalFindings }, feedback })`.
+     `teamwork_task_update({ taskId, status: "verified_pass" | "verified_fail", verification: { status, passedChecks, totalChecks, fatalFindings }, feedback, agent: "team/verifier" })`.
    - Aggregate into `.opencode/teamwork/$SESSION_ID/verify/summary.json`.
 8. **Iterate, re-dispatch, or merge.**
    - If verification fails (`verified_fail`): log pitfall via `teamwork_pitfall`, pass feedback to the next round, and call `teamwork_next` to re-enqueue.
